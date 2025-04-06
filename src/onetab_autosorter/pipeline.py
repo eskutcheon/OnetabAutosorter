@@ -9,8 +9,10 @@ from onetab_autosorter.keyword_extraction import KeyBertKeywordModel
 from onetab_autosorter.parsers import OneTabParser, JSONParser
 from onetab_autosorter.config import Config, get_cfg_from_cli
 from onetab_autosorter.utils.utils import deduplicate_entries, PythonSetEncoder
-from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
-
+##from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
+from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
+from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
+from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
 
 
 def get_parser(file_path: str):
@@ -78,32 +80,30 @@ def run_pipeline_with_scraper(config: Config):
 # (NEW) Keyword Extraction + Domain Boilerplate Filtering Pipeline
 #################################################################################################
 
-def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, sample_thresh=5, min_count=2) -> DomainBoilerplateFilter:
+#def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, sample_thresh=5, min_count=2) -> DomainBoilerplateFilter:
+def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, **kwargs) -> DomainBoilerplateFilter:
     # optionally load existing domain filter results from disk
     if from_file and os.path.isfile(filter_json_path):
         return DomainBoilerplateFilter.load_boilerplate_map(
             filter_json_path,
-            min_domain_samples=sample_thresh,
-            min_repeat_count=min_count
+            **kwargs  # pass any additional keyword arguments to the constructor
         )
-    return DomainBoilerplateFilter(min_domain_samples=sample_thresh, min_repeat_count=min_count)
+    return DomainBoilerplateFilter(**kwargs)  # create a new instance with the given parameters
 
-
+# TODO: add this as a static method within the boilerplate filter itself, with the fetcher function as an argument
 def run_boilerplate_filtering(
     sorted_domains,
     domain_filter: DomainBoilerplateFilter,
     domain_map: Dict[str, List[Dict]],
-    filter_threshold: int = 5,
-    min_domain_count: int = 2
 ):
     domain_counts = Counter(sorted_domains)
     # since some domains might already be locked from a prior run, only fetch if not locked
     for domain in tqdm(sorted_domains, desc="Domain Boilerplate Detection Step"):
         domain_data = domain_filter.get_domain_data(domain)
-        if (domain_data and domain_data.locked) or domain_counts[domain] < min_domain_count:
+        if (domain_data and domain_data.locked) or domain_counts[domain] < domain_filter.min_repeat_count:
             continue  # already locked from previous runs
         # fill only as many domain entries as needed (FILTER_THRESHOLD)
-        sampling_size = min(domain_counts[domain], filter_threshold)
+        sampling_size = min(domain_counts[domain], domain_filter.min_domain_samples)
         domain_entries = domain_map[domain][:sampling_size]
         urls = [e["url"] for e in domain_entries]
         # fetch HTML information from HTTP requests in a batch
@@ -120,18 +120,16 @@ def create_and_run_domain_filter(
     config: Config,
     sorted_domains,
     domain_map: Dict[str, List[Dict]],
-    filter_threshold: int = 5,
-    min_domain_count: int = 2,
-    json_path = os.path.join("output", "domain_boilerplate.json")
+    json_path = os.path.join("output", "domain_boilerplate.json"),
+    **kwargs
 ):
     # instantiate domain filter object
     domain_filter_obj = get_boilerplate_filter(
         json_path,
         from_file = config.init_domain_filter,
-        sample_thresh=filter_threshold,
-        min_count=min_domain_count
+        **kwargs
     )
-    run_boilerplate_filtering(sorted_domains, domain_filter_obj, domain_map, filter_threshold, min_domain_count)
+    run_boilerplate_filtering(sorted_domains, domain_filter_obj, domain_map)
     #if config.init_domain_filter: # might make this a separate config argument later
     domain_filter_obj.save_boilerplate_map(json_path)
     return domain_filter_obj
@@ -210,14 +208,24 @@ def run_pipeline_with_bertopic(config: Config):
     for e in entries:
         domain_map[e["domain"]].append(e)
     sorted_domains = sorted(domain_map.keys(), key=lambda d: len(domain_map[d]), reverse=True)
-    domain_filter = create_and_run_domain_filter(config, sorted_domains, domain_map, FILTER_THRESHOLD, MIN_DOMAIN_COUNT, filter_json_path)
+    domain_filter = create_and_run_domain_filter(
+        config,
+        sorted_domains,
+        domain_map,
+        filter_json_path,
+        min_domain_samples=FILTER_THRESHOLD,
+        min_repeat_count=MIN_DOMAIN_COUNT,
+        #? NOTE: scales kinda badly
+        ngram_range = (2, 8) # determines the n-gram range for boilerplate detection, e.g. (2,5) means phrases with 2-5 words are considered
+    )
     del domain_map, sorted_domains # free memory - variables not needed anymore
+    text_cleaner = TextCleaningFilter()
+    preprocessor = TextPreprocessingHandler(domain_filter, text_cleaner)
     # Create BERTTopic model with domain filtering + text truncation
     topic_model = BERTTopicKeywordModel(
         model_name=config.model_name,
         nr_topics=None,       # or 'auto', or an integer
-        domain_filter=domain_filter,
-        max_tokens=2000,      # or some other limit
+        preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
         fetcher_fn=None       # or default_html_fetcher_batch
     )
     # Run BERTTopic on the entire set of entries

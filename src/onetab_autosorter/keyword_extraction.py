@@ -13,7 +13,8 @@ from sentence_transformers import SentenceTransformer
 # from numpy import percentile
 from onetab_autosorter.utils.utils import is_internet_connected
 from onetab_autosorter.scraper.scraper_utils import default_html_fetcher, default_html_fetcher_batch, SupplementFetcher
-from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
+####from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
+from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
 from onetab_autosorter.utils.clean_utils import get_base_title_text
 
 
@@ -153,8 +154,7 @@ class BERTTopicKeywordModel(BaseKeywordModel):
         self,
         model_name: str = "all-MiniLM-L6-v2",
         nr_topics: Union[int, str, None] = None,
-        domain_filter: Optional[DomainBoilerplateFilter] = None,
-        max_tokens: int = 2000,
+        preprocessor: Optional[TextPreprocessingHandler] = None,
         sort_confidence_threshold = 0.01,  # threshold for sorting topic confidence scores #! setting threshold low while experimenting - update later
         fetcher_fn: Optional[SupplementFetcher] = None
     ):
@@ -175,12 +175,10 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             nr_topics = nr_topics, # can be an integer for number of topics or "auto" for automatic topic reduction
             embedding_model = SentenceTransformer(model_name),
             calculate_probabilities = True,
-            n_gram_range = (1, 2),
+            n_gram_range = (1, 2),  # unigrams, bigrams, and trigrams
             verbose = True)
-        # optionally store a domain filter for boilerplate removal
-        self.domain_filter = domain_filter
-        # limit maximum text length
-        self.max_tokens = max_tokens
+        # optionally store a preprocessor that handles text cleaning and domain filtering
+        self.preprocessor = preprocessor
         # set the confidence threshold for topic probabilities
         self.topic_prob_threshold = sort_confidence_threshold
         # for optional text fetching in a single batch
@@ -191,16 +189,12 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
 
 
-    def _filter_and_truncate_text(self, domain: str, full_text: str) -> str:
+    def _preprocess_text(self, domain: str, full_text: str) -> str:
         """ Apply domain-level boilerplate filtering (if domain is locked) and then truncate to max_tokens """
-        if self.domain_filter:
+        if self.preprocessor:
             # If domain is locked or partially locked, do the filtering - filter_boilerplate() will be a no-op if domain isn't locked yet
-            full_text = self.domain_filter.filter_boilerplate(domain, full_text)
-        # truncate to max_tokens
-        tokens = full_text.split()
-        if len(tokens) > self.max_tokens:
-            tokens = tokens[:self.max_tokens]
-        return " ".join(tokens)
+            full_text = self.preprocessor.process_text(full_text, domain, use_domain_filter=True)
+        return full_text
 
     def _simulate_data_as_text(self, entry: Dict[str, Any]) -> str:
         """ embed domain and group info into the text """
@@ -219,7 +213,7 @@ class BERTTopicKeywordModel(BaseKeywordModel):
         # title_str += self._simulate_data_as_text(entry)
         # merge the cleaned/filtered text
         combined = (title_str + " " + raw_text).strip()
-        final_text = self._filter_and_truncate_text(domain, combined)
+        final_text = self._preprocess_text(domain, combined)
         #!! TEMPORARY - log the final text for debugging purposes
         # if self.LOG_FINAL_TEXT:
         #     with open("output/final_text_log.md", "a", encoding="utf-8") as f:
@@ -258,12 +252,17 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             #f.write(f"DOMAIN: {domain}\nFinal Text: {text}\n\n---\n\n")
             json.dump(summaries_map, fptr, indent=2, ensure_ascii=False)
         # 2) Build corpus
-        corpus = []
+        # corpus = []
         for e in tqdm(entries, desc="Cleaning Entries for Corpus"):
             # Get the text from summaries_map if present, else empty
             raw_text = summaries_map.get(e["url"], "")
             doc_text = self._prepare_doc_for_entry(e, raw_text)
-            corpus.append(doc_text)
+            summaries_map[e["url"]] = doc_text  # update the map with the cleaned text
+            # corpus.append(doc_text)
+        with open("output/sample_text_cleaned_log4.json", 'w', encoding="utf-8") as fptr:
+            #f.write(f"DOMAIN: {domain}\nFinal Text: {text}\n\n---\n\n")
+            json.dump(summaries_map, fptr, indent=2, ensure_ascii=False)
+        corpus = list(summaries_map.values())  # list of cleaned text for each entry
         # 3) Run .fit_transform
         print(colored("Fitting corpus to the topic model...", color="green"))
         # topics: List[int], probs: np.ndarray

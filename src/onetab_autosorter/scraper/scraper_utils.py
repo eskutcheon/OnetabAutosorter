@@ -21,7 +21,7 @@ class SupplementFetcher(Protocol):
     def __call__(self, url: str) -> str: ...
 
 
-
+#& not currently used anywhere - keep it for future reference or if needed
 def is_similar_text(text1: str, text2: str, threshold: int = 60) -> bool:
     """ test whether (the start of) two text strings are roughly similar by their Levenshtein similarity ratio """
     # limit text to the first 50 characters for comparison to avoid long texts skewing the similarity (and for speed)
@@ -34,45 +34,12 @@ def is_similar_text(text1: str, text2: str, threshold: int = 60) -> bool:
     return fuzz.ratio(text1_partial, text2_partial) >= threshold
 
 
-def latex_remover(tag: Tag) -> bool:
-    # Example: remove tags that might store LaTeX code
-    # or if 'class' in tag.attrs and 'latex' in tag['class'] ...
-    if tag.name == "span" and "latex" in (tag.get("class") or []):
-        return True
-    return False
-
-
-def strip_soup(soup: BeautifulSoup) -> BeautifulSoup:
-    """ Remove script, style, noscript tags and other non-visible elements from the BeautifulSoup object """
-    #! literally just does the same thing as soup.get_text(), but might be worthwhile later
-    for tag in soup(["script", "style", "noscript"]):
-        tag.decompose()
-    lines = str(soup.prettify(formatter="minimal")).splitlines()
-    text = ""
-    for line in lines:
-        if not line.strip().startswith("<"):
-            text += line.strip() + "\n"
-    return text
-
-
+#& may keep this here or move it to the general TextCleaningFilter class later
 def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 1000) -> str:
     """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
     # first remove script and style tags
     # for tag in soup(["script", "style", "noscript"]):
     #     tag.decompose()
-    # remove_tags = ["script", "style", "noscript"]
-    # remove_selectors=["footer", "aside", "nav", ".footnote", "sup.reference", "span.citation", "..."]
-    # for tagname in remove_tags:
-    #     for t in soup.find_all(tagname):
-    #         t.decompose()
-    # # 2) Remove elements via CSS selectors if any
-    # for sel in remove_selectors:
-    #     for t in soup.select(sel):
-    #         t.decompose()
-    # # iterate all tags in BFS or DFS style
-    # for t in soup.find_all():
-    #     if latex_remover(t):
-    #         t.decompose()
     #text = list(islice(soup.stripped_strings, 0, max_tokens))
     # for element in soup.stripped_strings:
     #     text += element + " "
@@ -100,6 +67,8 @@ def default_html_fetcher(url: str) -> str:
             decoded = resp.content.decode("utf-8", errors="replace")
         soup = BeautifulSoup(decoded, parser_type)
     # other metadata tags used for previews
+    #& if moving to using the filtering classes, this should probably just pass back a tuple of (soup, metadata)
+        # then text can be extracted upstream in the main processing pipeline
     raw_text = fetch_full_text(soup)
     return raw_text #preprocess_html_text(raw_text)
 

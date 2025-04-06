@@ -1,39 +1,10 @@
 import os
 import json
-import re
 from dataclasses import dataclass, field
 from collections import defaultdict, Counter
-from typing import List, Dict, Union, Set, Optional, Any
+from typing import List, Dict, Set, Optional, Union, Any
 # local imports
-from onetab_autosorter.utils.clean_utils import get_stopword_list, assign_line_bin, extract_phrases_by_line
-
-
-
-# class AdvancedTextFilter:
-#     """ applies advanced text cleaning to remove unwanted non-English chars, LaTeX, references, etc """
-#     LATEX_PATTERN = re.compile(r"\$[^$]+\$")  # naive: remove $...$ content
-#     CITATION_PATTERN = re.compile(r"\[[^\]]*\]")  # naive bracket removal
-#     NON_ENGLISH_PATTERN = re.compile(r"[^a-zA-Z0-9\s.,!?]")  # naive approach
-#     # Add more patterns as needed
-#     def __init__(self, remove_latex: bool = True, remove_citations: bool = True,
-#                  remove_non_english: bool = True):
-#         self.remove_latex = remove_latex
-#         self.remove_citations = remove_citations
-#         self.remove_non_english = remove_non_english
-
-#     def filter_text(self, text: str) -> str:
-#         """ Perform advanced text cleaning on the given string """
-#         if self.remove_latex:
-#             text = re.sub(self.LATEX_PATTERN, "", text)
-#         if self.remove_citations:
-#             text = re.sub(self.CITATION_PATTERN, "", text)
-#         if self.remove_non_english:
-#             text = re.sub(self.NON_ENGLISH_PATTERN, "", text)
-#         # Possibly strip extra whitespace
-#         text = ' '.join(text.split())
-#         return text
-
-
+from onetab_autosorter.utils.clean_utils import assign_line_bin, extract_phrases_by_line
 
 
 @dataclass
@@ -57,28 +28,24 @@ class DomainFilterData:
 
     def __bool__(self):
         """ Allow checking if the domain data is empty or not """
-        return self.boilerplate # should maybe do this with self.locked, but was just thinking of testing for `{}` at the time
+        return bool(self.boilerplate) # should maybe do this with self.locked, but was just thinking of testing for `{}` at the time
 
 
 class DomainBoilerplateFilter:
-    """ Tracks repeated text snippets for each domain, determines repeated boilerplate, and locks it in for future filtering.
+    """ Tracks repeated text snippets for each domain, determines repeated boilerplate, and locks it in to filter out those phrases
+        from text scraped from websites of that domain in the future.
         - Tracks n-gram phrases by line offset bins across multiple pages
         - If a phrase appears in at least 'min_repeat_count' docs in the same bin, consider it boilerplate for that bin.
     """
-    def __init__(self, min_domain_samples=5, min_repeat_count=2, ngram_range=(2,3), num_bins=5, stopword_file: Optional[str] = None):
+    def __init__(self, min_domain_samples=5, min_repeat_count=2, ngram_range=(2,3), num_bins=5):
         """
-            :param min_domain_samples: Minimum number of samples (entries) from a domain
-                                    before we finalize boilerplate phrases for that domain.
-            :param min_repeat_count:   How many times a phrase must be observed (across
-                                    multiple entries) to be considered boilerplate.
+            :param min_domain_samples: Minimum number of samples (entries) from a domain before we finalize its boilerplate phrases.
+            :param min_repeat_count:   How many times to observe a phrase (across multiple entries) to be considered boilerplate.
         """
         self.min_domain_samples = min_domain_samples
         self.min_repeat_count = min_repeat_count
         self.ngram_range = ngram_range
         self.num_bins = num_bins # might want this to be variable later
-        # TODO: move to a main pipeline file later and change the arguments to this constructor to take the stopword list directly
-        stopword_file = stopword_file or os.path.join(os.path.dirname(__file__), "resources", "nltk_stopwords.txt")
-        self.stopwords = set(get_stopword_list(stopword_file))
         self.domains: Dict[str, DomainFilterData] = defaultdict(DomainFilterData)
 
 
@@ -112,9 +79,7 @@ class DomainBoilerplateFilter:
             return
         # Mark locked
         data.locked = True
-        ###all_texts = self.domain_texts[domain]  # list of entire text from each entry
-        # pages = self.domain_pages[domain]
-        # # for each page, break into lines, assign each line a bin, extract n-grams
+        # for each page, break into lines, assign each line a bin, extract n-grams
         for page_text in data.pages:
             lines = page_text.splitlines()
             self._build_ngram_bins(lines, data) # build n-gram bins for this page
@@ -132,7 +97,7 @@ class DomainBoilerplateFilter:
         bin_doc_sets: Dict[int, Set[str]] = defaultdict(set)
         for i, line in enumerate(lines):
             bin_id = assign_line_bin(i, total_lines) # using constant num_bins of 5 for simplicity for now
-            phrases = extract_phrases_by_line(line, self.ngram_range, self.num_bins)
+            phrases = extract_phrases_by_line(line, self.ngram_range)
             bin_doc_sets[bin_id].update(phrases)
         # now update doc frequency in domain_bin_phrases
         # TODO: collapse these loops to avoid multiple dict lookups and speed things up:
@@ -141,14 +106,8 @@ class DomainBoilerplateFilter:
                 domain_data.bin_phrases[bin_id][ph] += 1
 
 
-    def _filter_stopwords(self, text: str) -> str:
-        # NEED TO MOVE THIS TO A HIGHER LEVEL FILTERING CLASS
-        return " ".join([t for t in text.split() if t.lower() not in self.stopwords])  # filter out stopwords
-
     def filter_boilerplate(self, domain: str, text: str) -> str:
         """ Removes known boilerplate from the text if the domain is locked, else returns text as-is. """
-        #!! MOVE LATER - not what this function is for. Just trying to identify why stopwords are appearing in results all of a sudden
-        text = self._filter_stopwords(text)  # filter out stopwords before checking boilerplate
         data = self.domains[domain]
         if not data.locked or domain not in data.boilerplate:
             return text  # domain not locked yet, or no known boilerplate for a domain, return original text
@@ -158,10 +117,9 @@ class DomainBoilerplateFilter:
         for i, line in enumerate(lines):
             bin_id = assign_line_bin(i, total_lines, self.num_bins)
             # check each phrase in that bin's set
-            #boilerplate_phrases = self.domain_boilerplate[domain].get(bin_id, set())
-            boilerplate_phrases = data.boilerplate[bin_id]
+            repeated_phrases = data.boilerplate.get(bin_id, set())
             # remove line if it contains any repeated phrase
-            if any(ph in line.lower() for ph in boilerplate_phrases):
+            if any(rp in line.lower() for rp in repeated_phrases):
                 continue
             filtered_lines.append(line)
         return "\n".join(filtered_lines)

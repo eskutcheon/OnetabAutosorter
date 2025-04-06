@@ -16,14 +16,15 @@ IGNORE_PATTERNS = [
 ]
 
 
+#& UNUSED - general utility function to check if a string is mostly stopwords - should move to the TextCleaningFilter class later
+# def is_mostly_stopwords(ngram: str, stopwords: List[str], threshold_ratio=0.75) -> bool:
+#     tokens = ngram.split()
+#     if not tokens:
+#         return False
+#     sw_count = sum(1 for t in tokens if t in stopwords)
+#     return (sw_count / len(tokens)) >= threshold_ratio
 
-def is_mostly_stopwords(ngram: str, stopwords: List[str], threshold_ratio=0.75) -> bool:
-    tokens = ngram.split()
-    if not tokens:
-        return False
-    sw_count = sum(1 for t in tokens if t in stopwords)
-    return (sw_count / len(tokens)) >= threshold_ratio
-
+#& only used by `extract_phrases_by_line` to determine repeated phrases in n-grams - should become part of the domain filter if anything
 def _get_ngrams(tokens: List[str], n: int) -> Set[str]:
     """ Return the set of n-grams from a list of tokens. """
     if len(tokens) < n:
@@ -33,12 +34,12 @@ def _get_ngrams(tokens: List[str], n: int) -> Set[str]:
 
 
 # TODO: if adding more of these functions to a new Filtering class, this would be the default cleaning operations (w/IGNORE_PATTERNS)
+#& general text cleaning step for removing spammy lines and short lines (under 3 words) from raw text - should move to the TextCleaningFilter class later
 def _clean_text(text: str) -> str:
     lines = text.splitlines()
     cleaned = []
     for line in lines:
         norm = line.lower().strip()
-        # TODO: checking is_mostly_stopwords(norm, stopwords) should be done elsewhere with the n-grams extracted - handle later
         # norm.startswith("#") or norm.startswith("//") or norm.startswith("<!--") or norm.endswith("-->")
         # drop short lines or lines matching known spam patterns
         if not norm or any(re.search(pattern, norm) for pattern in IGNORE_PATTERNS) or (len(norm.split()) < 3):
@@ -46,18 +47,18 @@ def _clean_text(text: str) -> str:
         cleaned.append(norm) #line.strip())
     return "\n".join(cleaned)
 
-
+#& only used by preprocess_html_text() to remove near-duplicate lines based on Levenshtein similarity ratio
 def _remove_near_duplicates(lines: list[str], threshold: int = 85) -> list[str]:
     if not lines:
         return []
     output = [lines[0]]
     for line in lines[1:]:
-        # might want to use a partial ratio or token_sort_ratio for better near-duplicate detection
+        # TODO: look into using a partial ratio or token_sort_ratio for better near-duplicate detection
         if all(fuzz.ratio(line, seen) < threshold for seen in output):
             output.append(line)
     return output
 
-
+#& called by the webscraping function before passing back cleaned text to the main processing pipeline - should be moved to the TextCleaningFilter class later
 def preprocess_html_text(raw: Union[str, List[str]]) -> str:
     # remove near-duplicate lines, then drop short or spammy lines
     lines = raw.splitlines() if isinstance(raw, str) else raw
@@ -66,6 +67,7 @@ def preprocess_html_text(raw: Union[str, List[str]]) -> str:
     return text
 
 
+#& general text cleaning step for removing redundant domain titles from entry data titles - should move to the TextCleaningFilter class later
 def get_base_title_text(entry: Dict[str, Any]) -> str:
     """ strips out domain tokens from the page title to reduce noise in KeyBERT extraction """
     title = entry.get("title", "")
@@ -79,7 +81,8 @@ def get_base_title_text(entry: Dict[str, Any]) -> str:
     return re.sub(pattern, '', title, flags=re.IGNORECASE).strip()
 
 
-def extract_phrases_by_line(line: str, stopwords: List[str], ngram_range=(2,3)) -> Set[str]:
+#& relevant to the n-gram extraction and filtering logic for text lines within the domain filter - might move to `preprocessors/domain_filter.py` later
+def extract_phrases_by_line(line: str, ngram_range=(2,3)) -> Set[str]:
     """ Tokenize a line, produce n-grams in the given range (e.g. 2-3), and filter out n-grams that are mostly stopwords """
     # Simple tokenization by non-alphabetic
     tokens = re.findall(r"[A-Za-z0-9]+", line.lower())
@@ -87,10 +90,12 @@ def extract_phrases_by_line(line: str, stopwords: List[str], ngram_range=(2,3)) 
     for n in range(ngram_range[0], ngram_range[1] + 1):
         ngrams = _get_ngrams(tokens, n)
         for ng in ngrams:
-            if not is_mostly_stopwords(ng, stopwords=stopwords):
-                phrases.add(ng)
+            phrases.add(ng.strip())
+            # if not is_mostly_stopwords(ng, stopwords=stopwords):
+            #     phrases.add(ng)
     return phrases
 
+#& relevant to the domain filter and its boilerplate removal logic - might move to `preprocessors/domain_filter.py` later
 def assign_line_bin(line_idx: int, num_lines: int, num_bins: int = 5) -> int:
     """ Assigns a line index to a bin based on the total number of lines and the specified number of bins. """
     if num_bins <= 0:
@@ -107,6 +112,7 @@ def assign_line_bin(line_idx: int, num_lines: int, num_bins: int = 5) -> int:
         return num_bins - 1 # since it's the bin index starting at 0
 
 
+#& general text cleaning step - should move to the TextCleaningFilter class later
 def get_stopword_list(file_path: str):
     if not os.path.isfile(file_path):
         return []  # return empty list if the file doesn't exist
@@ -115,25 +121,3 @@ def get_stopword_list(file_path: str):
     stopwords = [sw.strip().lower() for sw in stopwords if sw.strip()]  # clean and lower-case
     return stopwords
 
-
-def filter_numeric_keywords(entries: List[Dict[str, Any]], threshold: int = 3) -> List[Dict[str, Any]]:
-    """ Filter out entries with too many numeric keywords in their title or description.
-        This is a heuristic to reduce noise from non-informative entries.
-    """
-    for entry in entries:
-        if "topic_keywords" not in entry:
-            continue
-        filtered_kw = {}
-        for word, score in entry["topic_keywords"].items():
-            # skip purely numeric or short tokens
-            if re.match(r"^\d+$", word):
-                continue
-            # skip tokens under length 2, etc.
-            if len(word) < 2:
-                continue
-            filtered_kw[word] = score
-        entry["topic_keywords"] = filtered_kw
-    return entries
-    # # count numeric tokens in title and description
-    # title_numeric_count = len(re.findall(r'\b\d+\b', entry.get("title", "")))
-    # desc_numeric_count = len(re.findall(r'\b\d+\b', entry.get("description", "")))
