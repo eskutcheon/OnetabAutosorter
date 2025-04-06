@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Optional
 from urllib.parse import urlparse
 # local imports
-from onetab_autosorter.utils import is_local_url
+from onetab_autosorter.utils.utils import is_local_url
 
 
 class BaseParser:

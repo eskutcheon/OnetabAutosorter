@@ -8,10 +8,12 @@ import requests
 import urllib3.exceptions
 import warnings
 import time
-from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from tqdm.auto import tqdm
+from itertools import islice
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, Tag
 from typing import Protocol, List, Dict
 from thefuzz import fuzz
-from onetab_autosorter.text_cleaning import preprocess_html_text
+from onetab_autosorter.utils.clean_utils import preprocess_html_text
 
 
 # just something I was going to try
@@ -25,72 +27,58 @@ def is_similar_text(text1: str, text2: str, threshold: int = 60) -> bool:
     # limit text to the first 50 characters for comparison to avoid long texts skewing the similarity (and for speed)
     if not text1 or not text2:
         return False
-    MAX_CHARS = 50
+    MAX_CHARS = 100
     text1_partial = text1[min(len(text1), MAX_CHARS):].strip()
     text2_partial = text2[min(len(text2), MAX_CHARS):].strip()
     # might also try partial_ratio or token_sort_ratio later
     return fuzz.ratio(text1_partial, text2_partial) >= threshold
 
 
+def latex_remover(tag: Tag) -> bool:
+    # Example: remove tags that might store LaTeX code
+    # or if 'class' in tag.attrs and 'latex' in tag['class'] ...
+    if tag.name == "span" and "latex" in (tag.get("class") or []):
+        return True
+    return False
 
-def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 10000) -> str:
-    """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
-    # first remove script and style tags
+
+def strip_soup(soup: BeautifulSoup) -> BeautifulSoup:
+    """ Remove script, style, noscript tags and other non-visible elements from the BeautifulSoup object """
+    #! literally just does the same thing as soup.get_text(), but might be worthwhile later
     for tag in soup(["script", "style", "noscript"]):
         tag.decompose()
-    text = soup.get_text(separator="\n", strip=True)
-    return text.split()[:max_tokens]  # split into tokens and limit to max_tokens
+    lines = str(soup.prettify(formatter="minimal")).splitlines()
+    text = ""
+    for line in lines:
+        if not line.strip().startswith("<"):
+            text += line.strip() + "\n"
+    return text
 
 
-
-# # TODO: I'm probably about to remove this entirely and start extracting all text from the HTML, then stripping
-#     # the boilerplate with a smallish NLP model or heuristic. I'm getting too much garbage otherwise
-# def fetch_from_tags(soup: BeautifulSoup) -> str:
-#     """ attempt to extract the most relevant text from the page as supplemental text """
-#     tag_chunks = []
-#     # TODO: consider referencing a dictionary of domains to skip descriptions, etc. (primarily duckduckgo's "privacy simplified" messages)
-#     meta_names = [
-#         {"name": "description"},
-#         {"property": "og:description"},
-#         #{"name": "twitter:description"}
-#     ]
-#     # append the title tag if it exists and has text
-#     title_tag = soup.find("title")
-#     if title_tag and (title_text := title_tag.get_text(strip=True)):
-#         # TODO: make a more structured way to check these tags since I want to compare the title with descriptions
-#         if tag_chunks and not is_similar_text(tag_chunks[-1], title_text):
-#             #print("Title (unique) found: ", title_text, end="\n\t> ")
-#             tag_chunks.append(title_text)
-#         elif not tag_chunks:  # if it's the first one found, add it regardless
-#             #print("Title (first) found: ", title_text, end="\n\t> ")
-#             tag_chunks.append(title_text.strip())
-#     for attrs in meta_names:
-#         tag = soup.find("meta", attrs=attrs)
-#         if tag and (tag_contents := tag.get("content")):
-#             if tag_chunks and not is_similar_text(tag_chunks[-1], tag_contents.strip()):
-#                 #print(attrs, " (unique) : ", tag_contents, end="\n\t> ")
-#                 # avoid duplicates if the same description is found
-#                 tag_chunks.append(tag_contents.strip())
-#             elif not tag_chunks:  # if it's the first one found, add it regardless
-#                 #print(attrs, " (first) : ", tag_contents, end="\n\t> ")
-#                 tag_chunks.append(tag_contents.strip())
-#     # try to append the first and last paragraph text if they exist
-#     paragraphs = soup.find_all("p")
-#     if paragraphs:
-#         # append the first paragraph
-#         p_start = paragraphs[0].get_text(strip=True)
-#         #print("First paragraph found: ", p_start, end="\n\t> ")
-#         tag_chunks.append(p_start)
-#         # append the last paragraph if there are more than one paragraph tags
-#         if len(paragraphs) > 1:
-#             p_end = paragraphs[-1].get_text(strip=True)
-#             #print("Last paragraph found: ", p_end, end="\n\t> ")
-#             tag_chunks.append(p_end)
-#     # print("\nFetched supplemental text from URL: ", url, end="\n\t>")
-#     # TODO: maybe consider trying to grab the last paragraph as well since it would summarize the page?
-#     return "\n".join(tag_chunks).strip()
-
-
+def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 1000) -> str:
+    """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
+    # first remove script and style tags
+    # for tag in soup(["script", "style", "noscript"]):
+    #     tag.decompose()
+    # remove_tags = ["script", "style", "noscript"]
+    # remove_selectors=["footer", "aside", "nav", ".footnote", "sup.reference", "span.citation", "..."]
+    # for tagname in remove_tags:
+    #     for t in soup.find_all(tagname):
+    #         t.decompose()
+    # # 2) Remove elements via CSS selectors if any
+    # for sel in remove_selectors:
+    #     for t in soup.select(sel):
+    #         t.decompose()
+    # # iterate all tags in BFS or DFS style
+    # for t in soup.find_all():
+    #     if latex_remover(t):
+    #         t.decompose()
+    #text = list(islice(soup.stripped_strings, 0, max_tokens))
+    # for element in soup.stripped_strings:
+    #     text += element + " "
+    text = soup.get_text(separator="\n", strip=True).split()
+    text_len = len(text)
+    return " ".join(text[:min(text_len, max_tokens)])  # split into tokens and limit to max_tokens
 
 ################################ requests-related functions ################################
 
@@ -112,10 +100,8 @@ def default_html_fetcher(url: str) -> str:
             decoded = resp.content.decode("utf-8", errors="replace")
         soup = BeautifulSoup(decoded, parser_type)
     # other metadata tags used for previews
-    # print("\nFetched supplemental text from URL: ", url, end="\n\t>")
-    #return fetch_from_tags(soup)
     raw_text = fetch_full_text(soup)
-    return preprocess_html_text(raw_text)
+    return raw_text #preprocess_html_text(raw_text)
 
 
 def write_failed_fetch_log(url: str, error: str):
@@ -145,33 +131,44 @@ def write_failed_fetch_log(url: str, error: str):
 #     return any(domain in url for domain in BLACKLIST_DOMAINS)
 
 
-def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2) -> str:
+def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2, preprocess = True) -> str:
     try:
-        return default_html_fetcher(url)
+        text = default_html_fetcher(url)
+        #? NOTE: apparently default_html_fetcher_batch is the only function calling this now so I'm just preparing by at least making a flag for it
+        if preprocess:
+            #!!! FIXME: seemingly returns lists without preprocess - need to iron out the cleaning utils
+            text = preprocess_html_text(text)
+        return text
+        # TODO: add preprocessing here to include it in the parallel execution
     except Exception as e:
         if isinstance(e, (requests.exceptions.RequestException, urllib3.exceptions.ReadTimeoutError)):
             if attempt <= max_retries:
                 # using exponential backoff for retry delay
                 time.sleep(retry_delay * attempt)
                 return safe_fetch(url, attempt + 1)
-            print(f"[Timeout] Failed to fetch after {attempt} attempts: {url}")
+            print(f"\t[Timeout] Failed to fetch after {attempt} attempts: {url}")
         write_failed_fetch_log(url, str(e))
     return ""
 
+# TODO: (General) add support for dynamic sites with Selenium webdriver or similar tools
 
-def default_html_fetcher_batch(urls: List[str]) -> Dict[str, str]:
+
+def default_html_fetcher_batch(urls: List[str], max_workers = 4) -> Dict[str, str]:
     if isinstance(urls, str):
         #print("WARNING: default_html_fetcher_batch received a single URL string instead of a list; using single URL.")
-        #! FIXME: not how I want to keep this function but I need to rewrite the way supplementary text is added in general
-        #return {urls: default_html_fetcher(urls)}
-        #return safe_fetch(urls)
         return {urls: preprocess_html_text(safe_fetch(urls))}
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        #results = list(executor.map(default_html_fetcher, urls))
-        results = list(executor.map(safe_fetch, urls))
-    # raw_map = dict(zip(urls, results))
-    # return {url: preprocess_html_text(text) for url, text in raw_map.items()}
-    cleaned = [preprocess_html_text(r) for r in results]
-    return dict(zip(urls, cleaned))
-    #return dict(zip(urls, results))
+    from concurrent.futures import as_completed, Future, ProcessPoolExecutor #ThreadPoolExecutor
+    # TODO: might need to try and see if the ProcessPoolExecutor works properly instead - could be a GIL issue since a lot is done within the functions
+    #? NOTE: rewrote this in a more explicit way to use a progress bar that updates properly
+    # TODO: need to add rate-limiting to domains, especially if we're fetching a lot of URLs concurrently and with domains grouped initially
+    with tqdm(total = len(urls), colour="cyan", desc="Concurrently fetching webpage contents") as pbar:
+        #with ThreadPoolExecutor(max_workers=10) as executor:
+        with ProcessPoolExecutor(max_workers=max_workers) as executor:
+            futures: Dict[Future, str] = {executor.submit(safe_fetch, url): url for url in urls}
+            results = {}
+            for future in as_completed(futures):
+                url = futures[future]
+                results[url] = future.result()
+                pbar.update()
+    #? NOTE: the url -> text dictionary doesn't preserve order of the input urls, but that could be added easily if needed
+    return results

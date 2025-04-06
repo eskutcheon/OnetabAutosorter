@@ -37,14 +37,27 @@ def deduplicate_entries(entries: List[Dict], max_length: int = 200) -> List[Dict
     return final_entries
 
 
-def is_internet_connected(host="8.8.8.8", port=53, timeout=3):
+
+
+def is_internet_connected(host="8.8.8.8", port=53, timeout=3, vpn_host=None, vpn_port=80):
     """ Returns True if it can open a TCP connection to the DNS server at `host`. """
     import socket
-    try:
-        socket.setdefaulttimeout(timeout)
+    socket.setdefaulttimeout(timeout)
+
+    def test_socket(h, p):
+        """ Test if a socket can connect to the given host and port. """
         test_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        test_socket.connect((host, port))
+        test_socket.connect((h, p))
         test_socket.close()
         return True
+    # first try the default host and port
+    try:
+        return test_socket(host, port)
     except OSError:
+        # If the default host fails, try the VPN-specific host if provided
+        if vpn_host:
+            try:
+                return test_socket(vpn_host, vpn_port)
+            except OSError:
+                pass
         return False

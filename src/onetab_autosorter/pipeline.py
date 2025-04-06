@@ -1,4 +1,4 @@
-import os
+import os, sys
 import json
 from collections import defaultdict, Counter
 from typing import Optional, Dict, List
@@ -8,7 +8,7 @@ from onetab_autosorter.scraper.scraper_utils import SupplementFetcher, default_h
 from onetab_autosorter.keyword_extraction import KeyBertKeywordModel
 from onetab_autosorter.parsers import OneTabParser, JSONParser
 from onetab_autosorter.config import Config, get_cfg_from_cli
-from onetab_autosorter.utils import deduplicate_entries, PythonSetEncoder
+from onetab_autosorter.utils.utils import deduplicate_entries, PythonSetEncoder
 from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
 
 
@@ -78,7 +78,7 @@ def run_pipeline_with_scraper(config: Config):
 # (NEW) Keyword Extraction + Domain Boilerplate Filtering Pipeline
 #################################################################################################
 
-def get_boilerplate_filter(filter_json_path, from_file: bool = False, sample_thresh=5, min_count=2) -> DomainBoilerplateFilter:
+def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, sample_thresh=5, min_count=2) -> DomainBoilerplateFilter:
     # optionally load existing domain filter results from disk
     if from_file and os.path.isfile(filter_json_path):
         return DomainBoilerplateFilter.load_boilerplate_map(
@@ -99,7 +99,8 @@ def run_boilerplate_filtering(
     domain_counts = Counter(sorted_domains)
     # since some domains might already be locked from a prior run, only fetch if not locked
     for domain in tqdm(sorted_domains, desc="Domain Boilerplate Detection Step"):
-        if domain_filter.domain_locked[domain] or domain_counts[domain] < min_domain_count:
+        domain_data = domain_filter.get_domain_data(domain)
+        if (domain_data and domain_data.locked) or domain_counts[domain] < min_domain_count:
             continue  # already locked from previous runs
         # fill only as many domain entries as needed (FILTER_THRESHOLD)
         sampling_size = min(domain_counts[domain], filter_threshold)
@@ -109,10 +110,35 @@ def run_boilerplate_filtering(
         text_map = default_html_fetcher_batch(urls)
         for e in domain_entries:
             raw_text = text_map.get(e["url"], "")
+            #? NOTE: an internal trigger to add_entry_text finalizes phrases after enough are encountered
             domain_filter.add_entry_text(domain, raw_text)
     # Forcefully finalize any domain that didn't meet min_domain_samples:
     domain_filter.force_finalize_all()
 
+
+def create_and_run_domain_filter(
+    config: Config,
+    sorted_domains,
+    domain_map: Dict[str, List[Dict]],
+    filter_threshold: int = 5,
+    min_domain_count: int = 2,
+    json_path = os.path.join("output", "domain_boilerplate.json")
+):
+    # instantiate domain filter object
+    domain_filter_obj = get_boilerplate_filter(
+        json_path,
+        from_file = config.init_domain_filter,
+        sample_thresh=filter_threshold,
+        min_count=min_domain_count
+    )
+    run_boilerplate_filtering(sorted_domains, domain_filter_obj, domain_map, filter_threshold, min_domain_count)
+    #if config.init_domain_filter: # might make this a separate config argument later
+    domain_filter_obj.save_boilerplate_map(json_path)
+    return domain_filter_obj
+
+
+# TODO: if we added a way for someone to give their bookmark folder structure,
+    # it could be flattened and folder names could be used as the `seed_topic_list` for BERTTopic
 
 
 def run_pipeline_with_domain_filter(config: Config):
@@ -124,24 +150,19 @@ def run_pipeline_with_domain_filter(config: Config):
         5) Re-fetch or reuse the text, filter it, run KeyBERT, and produce final JSON
         6) Save updated domain filter if needed
     """
+    # TODO: combine all the domain filtering stuff into another convenience function to simplify arguments
     FILTER_THRESHOLD = 5
     MIN_DOMAIN_COUNT = 2
     filter_json_path = os.path.join("output", "domain_boilerplate.json")
     entries = load_entries(config.input_file, deduplicate=config.deduplicate, max_url_len=config.dedupe_url_max_len)
-    domain_filter_obj = get_boilerplate_filter(
-        filter_json_path,
-        from_file = config.init_domain_filter,
-        sample_thresh=FILTER_THRESHOLD,
-        min_count=MIN_DOMAIN_COUNT
-    )
     # select entries by domain then sort by frequency so the most frequent domains get processed first
     domain_map: Dict[str, List[Dict]] = defaultdict(list)
     for e in entries:
         domain_map[e["domain"]].append(e)
     sorted_domains = sorted(domain_map.keys(), key=lambda d: len(domain_map[d]), reverse=True)
-    # initialize (and possibly warm up) the filter by *just fetching text*, ignoring KeyBERT for now
     print("=== PASS 1: Accumulate and lock domain boilerplate. ===")
-    run_boilerplate_filtering(sorted_domains, domain_filter_obj, domain_map, FILTER_THRESHOLD, MIN_DOMAIN_COUNT)
+    # instantiate domain filter object and run the filter #? (we set the filter first because the keyword extractor expects locked domain keys)
+    domain_filter_obj = create_and_run_domain_filter(config, sorted_domains, domain_map, FILTER_THRESHOLD, MIN_DOMAIN_COUNT, filter_json_path)
     print("=== PASS 2: Keyword Extraction with domain-based filtering. ===")
     # Re-fetch text; #?should probably store them in memory from the filtering, but it only fetches as many as needed
     # Prepare KeyBERT
@@ -151,6 +172,7 @@ def run_pipeline_with_domain_filter(config: Config):
         prefetch_factor=1  # or config.chunk_size if you want batch logic
     )
     final_results = []
+    #!!! FIXME: no way in hell this runs in the future without rate-limiting - should also try to maximize time between request by the ordering
     # do domain by domain again, or add single pass with chunking later
     print("NOTE: Most frequent sites are processed in chunks first, so the estimated runtime will appear higher at the start.")
     for domain in tqdm(sorted_domains, desc="Domain (Extraction Step)"):
@@ -168,9 +190,7 @@ def run_pipeline_with_domain_filter(config: Config):
     # save final JSON with keywords added to all entries
     with open(config.output_json, "w", encoding="utf-8") as f:
         json.dump(final_results, f, indent=2, cls=PythonSetEncoder)
-    # Optionally, if new domains or new lines have been discovered, re-save the domain filter
-    #if config.init_domain_filter: # might make this a separate config argument later
-    domain_filter_obj.save_boilerplate_map(filter_json_path)
+
 
 
 ##############################################################################################################
@@ -180,22 +200,33 @@ def run_pipeline_with_domain_filter(config: Config):
 def run_pipeline_with_bertopic(config: Config):
     # TODO: include the domain filtering back in - written by Copilot so it missed some stuff
     from onetab_autosorter.keyword_extraction import BERTTopicKeywordModel
-    # 1. Load entries, maybe do domain filtering, etc.
+    FILTER_THRESHOLD = 5
+    MIN_DOMAIN_COUNT = 2
+    filter_json_path = os.path.join("output", "domain_boilerplate.json")
+    # Load entries, maybe do domain filtering, etc.
     entries = load_entries(config.input_file, deduplicate=config.deduplicate, max_url_len=config.dedupe_url_max_len)
-    # 2. Create BERTTopic model
-    # pass in nr_topics if you want to reduce the total number of topics discovered
+    # select entries by domain then sort by frequency so the most frequent domains get processed first
+    domain_map: Dict[str, List[Dict]] = defaultdict(list)
+    for e in entries:
+        domain_map[e["domain"]].append(e)
+    sorted_domains = sorted(domain_map.keys(), key=lambda d: len(domain_map[d]), reverse=True)
+    domain_filter = create_and_run_domain_filter(config, sorted_domains, domain_map, FILTER_THRESHOLD, MIN_DOMAIN_COUNT, filter_json_path)
+    del domain_map, sorted_domains # free memory - variables not needed anymore
+    # Create BERTTopic model with domain filtering + text truncation
     topic_model = BERTTopicKeywordModel(
         model_name=config.model_name,
-        nr_topics=None,  # or "auto", or some integer
-        prefetch_factor=config.chunk_size
+        nr_topics=None,       # or 'auto', or an integer
+        domain_filter=domain_filter,
+        max_tokens=2000,      # or some other limit
+        fetcher_fn=None       # or default_html_fetcher_batch
     )
-    # 3. Fit the model to the entire set of entries
-    # We'll just call generate_stream for consistency
-    final_results = topic_model.generate_stream(entries)
-    final_results = list(final_results)
-    # 4. Save final JSON (now each entry has "topic_id" and "topic_keywords")
+    # Run BERTTopic on the entire set of entries
+    updated_entries = topic_model.run(entries)
+    if not updated_entries:
+        raise RuntimeError("ERROR: updated entries returned empty")
+    # Save or process the updated entries
     with open(config.output_json, "w", encoding="utf-8") as f:
-        json.dump(final_results, f, indent=2)
+        json.dump(updated_entries, f, indent=2, cls=PythonSetEncoder)
 
 
 
