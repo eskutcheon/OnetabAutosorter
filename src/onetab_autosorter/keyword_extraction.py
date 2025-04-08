@@ -2,31 +2,18 @@ import re
 import json
 from tqdm import tqdm
 import numpy as np
-#from copy import deepcopy
 from termcolor import colored
 from collections import deque
 from typing import List, Tuple, Dict, Any, Optional, Union, Callable, Iterable
-# NLP topic models
+# NLP topic models and backends
 from keybert import KeyBERT
 from bertopic import BERTopic
 from sentence_transformers import SentenceTransformer
-# from numpy import percentile
+# local imports
 from onetab_autosorter.utils.utils import is_internet_connected
 from onetab_autosorter.scraper.scraper_utils import default_html_fetcher, default_html_fetcher_batch, SupplementFetcher
-####from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
 from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
 from onetab_autosorter.utils.clean_utils import get_base_title_text
-
-
-#~ if I extract all the filtering and fetching code, I should group entries by their domain
-    #~ I could avoid referencing blacklists by just comparing fetched supplemental text against others in the domain,
-    #~ since everything that's duplicated is likely to be boilerplate
-
-# TODO: might be better to extract the filtering functions to new utility functions to comply with single responsibility principle
-    # if they were joined to a single class, they'd be the ones containing the IGNORE_KEYWORDS and IGNORED_DOMAINS lists
-    # since the filtering functions currently come one after another, it should follow a pipeline-like structure (like torch.nn.Sequential)
-    # consider some differentiation of preprocessing (e.g. `_get_base_title_text`) and postprocessing (e.g. `_refine_keywords`) utilities
-
 
 
 class BaseKeywordModel:
@@ -37,9 +24,6 @@ class BaseKeywordModel:
 class KeyBertKeywordModel(BaseKeywordModel):
     """ wrapper class for KeyBERT - retrieves keywords from a given text (supplemented with response headers) using KeyBERT """
     MAX_PHRASE_LENGTH = 3
-    #MIN_SENTENCE_LENGTH = 6  # minimum number of words in a sentence to be considered for keyword extraction
-    # IGNORED_KEYWORDS = {"privacy simplified", "non javascript", "url", "link", "website", "webpage", "page", "site", "bookmark", "tab"}
-    # IGNORED_DOMAINS = {"google", "bing", "duckduckgo", "yahoo", "baidu", "yandex", "ask", "aol", "msn"}
 
     def __init__(self, model_name="all-MiniLM-L6-v2", top_k=10, prefetch_factor: int = 1, fetcher_fn : Optional[SupplementFetcher] = None):
         self.model = KeyBERT(model=model_name)
@@ -61,11 +45,7 @@ class KeyBertKeywordModel(BaseKeywordModel):
             if score < min_score:
                 continue
             normalized = re.sub(r'\b(\w+)( \1\b)+', r'\1', kw.lower())  # remove internal repetition
-            # tokens = frozenset([*normalized.split(), normalized]) # split by spaces and create a frozenset of tokens
             tokens = frozenset(normalized.split()) # split by spaces and create a frozenset of tokens
-            # strip any keywords found within self.IGNORED_KEYWORDS
-            # if any(ignored in tokens for ignored in self.IGNORED_KEYWORDS):
-            #     continue
             # skip if all tokens already covered by a previously accepted phrase
             if tokens & seen_tokens == tokens:
                 continue
@@ -78,15 +58,8 @@ class KeyBertKeywordModel(BaseKeywordModel):
     # TODO: add to some Webcrawler class that prepares the entries for keyword extraction, so that it can handle both fetching and cleaning
     def _prepare_content_for_extraction(self, entry: Dict[str, Any], supplement_text: Optional[str] = None) -> str:
         """ combine the (possibly domain-filtered) supplement_text with a simplified version of the title """
-        MAX_TOKENS = 2000  # limit the text length to avoid excessive processing time and memory usage
         text = get_base_title_text(entry)
         text = (text + " " + (supplement_text or "")).strip()
-        # base this on recurring text strings in all supplementary texts from the same domain
-        #text = self._append_supplementary_text(text, entry["url"], supplement_text)
-        #return text
-        tokens = text.split()
-        if len(tokens) > MAX_TOKENS:
-            text = " ".join(tokens[:MAX_TOKENS])
         return text
 
 
@@ -104,7 +77,6 @@ class KeyBertKeywordModel(BaseKeywordModel):
             top_n=self.top_k
         )
         # filtering domain keywords since they could be present from the supplementary text (keep singleton domain name though)
-        ###raw_filtered = self._filter_domain_keywords(raw, entry.get("domain", ""))
         refined = self._refine_keywords(raw)
         entry["keywords"] = refined
         return entry
@@ -175,8 +147,9 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             nr_topics = nr_topics, # can be an integer for number of topics or "auto" for automatic topic reduction
             embedding_model = SentenceTransformer(model_name),
             calculate_probabilities = True,
-            n_gram_range = (1, 2),  # unigrams, bigrams, and trigrams
-            verbose = True)
+            n_gram_range = (1, 3),  # unigrams, bigrams, and trigrams
+            verbose = True
+        )
         # optionally store a preprocessor that handles text cleaning and domain filtering
         self.preprocessor = preprocessor
         # set the confidence threshold for topic probabilities
@@ -196,6 +169,7 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             full_text = self.preprocessor.process_text(full_text, domain, use_domain_filter=True)
         return full_text
 
+    # will only be relevant using the tabular dataframe with output keywords for clustering later
     def _simulate_data_as_text(self, entry: Dict[str, Any]) -> str:
         """ embed domain and group info into the text """
         # TODO: move upstream since it's more key-dependent than I'd prefer
@@ -214,10 +188,6 @@ class BERTTopicKeywordModel(BaseKeywordModel):
         # merge the cleaned/filtered text
         combined = (title_str + " " + raw_text).strip()
         final_text = self._preprocess_text(domain, combined)
-        #!! TEMPORARY - log the final text for debugging purposes
-        # if self.LOG_FINAL_TEXT:
-        #     with open("output/final_text_log.md", "a", encoding="utf-8") as f:
-        #         f.write(f"URL: {entry['url']}\nFinal Text: {final_text}\n---\n\n")
         return final_text.strip()  # ensure no leading/trailing whitespace is left
 
 
@@ -241,6 +211,11 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             3. Run BERTTopic .fit_transform(...) on the entire corpus.
             4. Assign each entry's topic_id + top topic keywords in the 'topic_keywords' field.
         """
+        def dump_summaries_map(file_path: str, summaries_map: Dict[str, str]) -> None:
+            """ Helper function to dump the summaries map to a JSON file for debugging purposes """
+            with open(file_path, 'w', encoding="utf-8") as fptr:
+                json.dump(summaries_map, fptr, indent=4, ensure_ascii=False)
+            print(colored(f"Summaries map dumped to {file_path}", color="green"))
         # 1) Possibly fetch all text in one batch
         summaries_map = {}
         #print(colored("Fetching webpage content of all urls...", color="green"))
@@ -248,26 +223,21 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             urls = [e["url"] for e in entries]
             # fetch text for each URL (e.g. domain-filtered or raw HTML)
             summaries_map = self.fetcher_fn(urls)
-        with open("output/sample_text_log4.json", 'w', encoding="utf-8") as fptr:
-            #f.write(f"DOMAIN: {domain}\nFinal Text: {text}\n\n---\n\n")
-            json.dump(summaries_map, fptr, indent=2, ensure_ascii=False)
+        #! [DEBUG] Dump fetched summaries map to a file for debugging - REMOVE LATER
+        dump_summaries_map("output/sample_text_log9.json", summaries_map)
         # 2) Build corpus
-        # corpus = []
         for e in tqdm(entries, desc="Cleaning Entries for Corpus"):
             # Get the text from summaries_map if present, else empty
             raw_text = summaries_map.get(e["url"], "")
             doc_text = self._prepare_doc_for_entry(e, raw_text)
             summaries_map[e["url"]] = doc_text  # update the map with the cleaned text
-            # corpus.append(doc_text)
-        with open("output/sample_text_cleaned_log4.json", 'w', encoding="utf-8") as fptr:
-            #f.write(f"DOMAIN: {domain}\nFinal Text: {text}\n\n---\n\n")
-            json.dump(summaries_map, fptr, indent=2, ensure_ascii=False)
+        #! [DEBUG] Dump fetched summaries map to a file for debugging - REMOVE LATER
+        dump_summaries_map("output/sample_cleaned_log9.json", summaries_map)
         corpus = list(summaries_map.values())  # list of cleaned text for each entry
         # 3) Run .fit_transform
         print(colored("Fitting corpus to the topic model...", color="green"))
         # topics: List[int], probs: np.ndarray
         topics, probs = self.topic_model.fit_transform(corpus)
-        # TODO: add all this to a new postprocessing method instead of just _add_topics_to_entries
         # 4) Store topic_id & topic keywords
         for entry, topic_id, prob in zip(entries, topics, probs):
             entry["topic_id"] = topic_id

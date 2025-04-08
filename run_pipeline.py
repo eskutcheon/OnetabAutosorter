@@ -5,7 +5,7 @@ import os
 sys.path.insert(0, os.path.abspath("src"))
 # TODO: make this use a common pipeline runner function later
 from src.onetab_autosorter.pipeline import run_pipeline, run_pipeline_with_scraper, run_pipeline_with_domain_filter, run_pipeline_with_bertopic
-from src.onetab_autosorter.config import get_cfg_from_cli
+from onetab_autosorter.config.config import get_cfg_from_cli
 
 # FETCHER_REGISTRY = {
 #     "default": default_html_fetcher,

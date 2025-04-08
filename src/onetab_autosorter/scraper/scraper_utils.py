@@ -12,8 +12,7 @@ from tqdm.auto import tqdm
 from itertools import islice
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, Tag
 from typing import Protocol, List, Dict
-from thefuzz import fuzz
-from onetab_autosorter.utils.clean_utils import preprocess_html_text
+#from onetab_autosorter.utils.clean_utils import preprocess_html_text
 
 
 # just something I was going to try
@@ -21,31 +20,31 @@ class SupplementFetcher(Protocol):
     def __call__(self, url: str) -> str: ...
 
 
-#& not currently used anywhere - keep it for future reference or if needed
-def is_similar_text(text1: str, text2: str, threshold: int = 60) -> bool:
-    """ test whether (the start of) two text strings are roughly similar by their Levenshtein similarity ratio """
-    # limit text to the first 50 characters for comparison to avoid long texts skewing the similarity (and for speed)
-    if not text1 or not text2:
-        return False
-    MAX_CHARS = 100
-    text1_partial = text1[min(len(text1), MAX_CHARS):].strip()
-    text2_partial = text2[min(len(text2), MAX_CHARS):].strip()
-    # might also try partial_ratio or token_sort_ratio later
-    return fuzz.ratio(text1_partial, text2_partial) >= threshold
+
+#? not sure if I'm going to be using this at all
+def strip_soup(soup: BeautifulSoup) -> BeautifulSoup:
+    """ Remove script, style, noscript tags and other non-visible elements from the BeautifulSoup object """
+    #! literally just does the same thing as soup.get_text(), but might be worthwhile later
+    for tag in soup(["script", "style", "noscript"]):
+        tag.decompose()
+    lines = str(soup.prettify(formatter="minimal")).splitlines()
+    text = ""
+    for line in lines:
+        if not line.strip().startswith("<"):
+            text += line.strip() + "\n"
+    return text
 
 
 #& may keep this here or move it to the general TextCleaningFilter class later
-def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 1000) -> str:
+def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 200) -> str:
     """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
     # first remove script and style tags
     # for tag in soup(["script", "style", "noscript"]):
     #     tag.decompose()
-    #text = list(islice(soup.stripped_strings, 0, max_tokens))
-    # for element in soup.stripped_strings:
-    #     text += element + " "
-    text = soup.get_text(separator="\n", strip=True).split()
-    text_len = len(text)
-    return " ".join(text[:min(text_len, max_tokens)])  # split into tokens and limit to max_tokens
+    text = list(islice(soup.stripped_strings, 0, max_tokens))
+    #text = soup.get_text(separator="\n", strip=True).split()
+    #text_len = len(text)
+    return " ".join(text) #[:min(text_len, max_tokens)])  # split into tokens and limit to max_tokens
 
 ################################ requests-related functions ################################
 
@@ -59,7 +58,6 @@ def default_html_fetcher(url: str) -> str:
     parser_type = "xml" if "xml" in content_type else "html.parser"
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
-        #soup = BeautifulSoup(resp.content.decode(encoding, errors="replace")[:4096], parser_type)
         # try-catch handles any garbage encoding that `requests` mis-detects
         try:
             decoded = resp.content.decode(encoding, errors="replace")
@@ -69,8 +67,8 @@ def default_html_fetcher(url: str) -> str:
     # other metadata tags used for previews
     #& if moving to using the filtering classes, this should probably just pass back a tuple of (soup, metadata)
         # then text can be extracted upstream in the main processing pipeline
-    raw_text = fetch_full_text(soup)
-    return raw_text #preprocess_html_text(raw_text)
+    return fetch_full_text(soup)
+    #return preprocess_html_text(raw_text)
 
 
 def write_failed_fetch_log(url: str, error: str):
@@ -79,12 +77,9 @@ def write_failed_fetch_log(url: str, error: str):
     with open(FAILED_FETCH_LOG, "a", encoding="utf-8", errors="ignore") as fptr:
         # Log the failed URL to a file for later review
         timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        # encoding the errors to handle any non-UTF-8 characters gracefully
-        # we have to do a lot of extra work because Windows sucks and seems to default back to ANSI (cp1252)
-        #safe_error = str(error).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-        #safe_url = url.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
-        safe_url = html.escape(url)
-        safe_error = html.escape(str(error))
+        # encoding the errors to handle any non-UTF-8 characters gracefully - have to do a lot of extra work because Windows sucks and seems to default back to ANSI (cp1252)
+        safe_url = html.escape(url) # url.encode("utf-8", errors="replace").decode("utf-8", errors="replace")
+        safe_error = html.escape(str(error)) # str(error).encode("utf-8", errors="replace").decode("utf-8", errors="replace")
         log_entry = f"[{timestamp}] {safe_url}\n\tERROR: \"{safe_error}\"\n"
         try:
             fptr.write(log_entry)
@@ -93,20 +88,12 @@ def write_failed_fetch_log(url: str, error: str):
             fptr.write(fallback)
 
 
-# might add blacklisting later, but for now I'm hoping this refactor catches it all
-# BLACKLIST_DOMAINS = ["google.com", "twitter.com"]
-
-# def is_blacklisted(url: str) -> bool:
-#     return any(domain in url for domain in BLACKLIST_DOMAINS)
 
 
-def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2, preprocess = True) -> str:
+def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2) -> str:
     try:
         text = default_html_fetcher(url)
         #? NOTE: apparently default_html_fetcher_batch is the only function calling this now so I'm just preparing by at least making a flag for it
-        if preprocess:
-            #!!! FIXME: seemingly returns lists without preprocess - need to iron out the cleaning utils
-            text = preprocess_html_text(text)
         return text
         # TODO: add preprocessing here to include it in the parallel execution
     except Exception as e:
@@ -122,19 +109,37 @@ def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2, preprocess
 # TODO: (General) add support for dynamic sites with Selenium webdriver or similar tools
 
 
-def default_html_fetcher_batch(urls: List[str], max_workers = 4) -> Dict[str, str]:
+def default_html_fetcher_batch(urls: List[str], max_workers = 6) -> Dict[str, str]:
     if isinstance(urls, str):
         #print("WARNING: default_html_fetcher_batch received a single URL string instead of a list; using single URL.")
-        return {urls: preprocess_html_text(safe_fetch(urls))}
-    from concurrent.futures import as_completed, Future, ProcessPoolExecutor #ThreadPoolExecutor
-    # TODO: might need to try and see if the ProcessPoolExecutor works properly instead - could be a GIL issue since a lot is done within the functions
+        return {urls: safe_fetch(urls, preprocess=True)}
+    from concurrent.futures import as_completed, Future, ProcessPoolExecutor
     #? NOTE: rewrote this in a more explicit way to use a progress bar that updates properly
     # TODO: need to add rate-limiting to domains, especially if we're fetching a lot of URLs concurrently and with domains grouped initially
     with tqdm(total = len(urls), colour="cyan", desc="Concurrently fetching webpage contents") as pbar:
-        #with ThreadPoolExecutor(max_workers=10) as executor:
         with ProcessPoolExecutor(max_workers=max_workers) as executor:
             futures: Dict[Future, str] = {executor.submit(safe_fetch, url): url for url in urls}
-            results = {}
+            results = {} # instantiate here so that it's visible to all processes
+            for future in as_completed(futures):
+                url = futures[future]
+                results[url] = future.result()
+                pbar.update()
+    #? NOTE: the url -> text dictionary doesn't preserve order of the input urls, but that could be added easily if needed
+    return results
+
+
+# Since requests releases the GIL lock during I/O, the ThreadPoolExecutor should be faster in this case.
+def default_html_fetcher_batch_threaded(urls: List[str], max_workers = 12) -> Dict[str, str]:
+    if isinstance(urls, str):
+        #print("WARNING: default_html_fetcher_batch received a single URL string instead of a list; using single URL.")
+        return {urls: safe_fetch(urls, preprocess=True)}
+    from concurrent.futures import as_completed, Future, ThreadPoolExecutor
+    #? NOTE: rewrote this in a more explicit way to use a progress bar that updates properly
+    # TODO: need to add rate-limiting to domains, especially if we're fetching a lot of URLs concurrently and with domains grouped initially
+    with tqdm(total = len(urls), colour="cyan", desc="Concurrently fetching webpage contents") as pbar:
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures: Dict[Future, str] = {executor.submit(safe_fetch, url): url for url in urls}
+            results = {} # instantiate here so that it's visible to all processes
             for future in as_completed(futures):
                 url = futures[future]
                 results[url] = future.result()

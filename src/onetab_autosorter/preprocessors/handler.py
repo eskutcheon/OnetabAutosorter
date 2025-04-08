@@ -1,13 +1,16 @@
-import re
+
 from typing import Optional, Dict
 from bs4 import BeautifulSoup
 
 # Suppose we import or define these somewhere:
 from .domain_filter import DomainBoilerplateFilter
-from .text_filters import HTML2TextFilter, TextCleaningFilter
-# from .advanced_text_filter import AdvancedTextFilter (like your custom remove non-English, LaTeX, etc.)
-# from .scraper_utils import fetch_full_text
-# from .clean_utils import preprocess_html_text
+from .text_filters import TextCleaningFilter
+
+
+
+# TODO: might still wrap stuff in a WebScraper class and pass it here for unified preprocessing directly from the HTML from BeautifulSoup
+    # - would allow for easier management of all the actual scraping logic like adding rate-limiting, 
+    # might end up removing the check for whether the user has an internet connection unless I find a much easier way
 
 class TextPreprocessingHandler:
     """ Aggregates multiple text preprocessing steps into a single pipeline manager:
@@ -21,7 +24,7 @@ class TextPreprocessingHandler:
         self,
         domain_filter: DomainBoilerplateFilter = None,
         cleaning_filter: TextCleaningFilter = None,
-        max_tokens=1000,
+        max_tokens=200,
     ):
         """
             :param domain_filter: an instance of DomainBoilerplateFilter (optional).
@@ -31,6 +34,8 @@ class TextPreprocessingHandler:
         self.domain_filter = domain_filter
         self.cleaning_filter = cleaning_filter
         self.max_tokens = max_tokens
+        ### assuming that the domain filter has been trained already (need to iron out that logic):
+        self.domain_names = self.domain_filter.get_present_domains()
 
     def process_html(
         self,
@@ -65,6 +70,8 @@ class TextPreprocessingHandler:
 
     def _apply_domain_filter(self, domain: str, text: str) -> str:
         # if domain not locked, add or if locked, filter
+        if domain not in self.domain_names:
+            return text
         data = self.domain_filter.get_domain_data(domain)
         if data and data.locked:
             # domain is locked => filter
@@ -93,7 +100,7 @@ class TextPreprocessingHandler:
             tokens = tokens[: self.max_tokens]
         return " ".join(tokens)
 
-
+    # !!! Seemingly not used - need to do a check on the domain filter's data dictionary and call it if needed
     def finalize_domain_filter(self):
         """ forcibly finalize domain filter if needed. """
         if self.domain_filter:
