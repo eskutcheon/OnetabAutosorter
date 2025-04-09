@@ -11,13 +11,8 @@ import time
 from tqdm.auto import tqdm
 from itertools import islice
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, Tag
-from typing import Protocol, List, Dict
+from typing import List, Dict
 #from onetab_autosorter.utils.clean_utils import preprocess_html_text
-
-
-# just something I was going to try
-class SupplementFetcher(Protocol):
-    def __call__(self, url: str) -> str: ...
 
 
 
@@ -109,33 +104,13 @@ def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2) -> str:
 # TODO: (General) add support for dynamic sites with Selenium webdriver or similar tools
 
 
-def default_html_fetcher_batch(urls: List[str], max_workers = 6) -> Dict[str, str]:
+def default_html_fetcher_batch(urls: List[str], max_workers = 10) -> Dict[str, str]:
     if isinstance(urls, str):
         #print("WARNING: default_html_fetcher_batch received a single URL string instead of a list; using single URL.")
         return {urls: safe_fetch(urls, preprocess=True)}
-    from concurrent.futures import as_completed, Future, ProcessPoolExecutor
+    from concurrent.futures import as_completed, Future, ThreadPoolExecutor #ProcessPoolExecutor
     #? NOTE: rewrote this in a more explicit way to use a progress bar that updates properly
-    # TODO: need to add rate-limiting to domains, especially if we're fetching a lot of URLs concurrently and with domains grouped initially
-    with tqdm(total = len(urls), colour="cyan", desc="Concurrently fetching webpage contents") as pbar:
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            futures: Dict[Future, str] = {executor.submit(safe_fetch, url): url for url in urls}
-            results = {} # instantiate here so that it's visible to all processes
-            for future in as_completed(futures):
-                url = futures[future]
-                results[url] = future.result()
-                pbar.update()
-    #? NOTE: the url -> text dictionary doesn't preserve order of the input urls, but that could be added easily if needed
-    return results
-
-
-# Since requests releases the GIL lock during I/O, the ThreadPoolExecutor should be faster in this case.
-def default_html_fetcher_batch_threaded(urls: List[str], max_workers = 12) -> Dict[str, str]:
-    if isinstance(urls, str):
-        #print("WARNING: default_html_fetcher_batch received a single URL string instead of a list; using single URL.")
-        return {urls: safe_fetch(urls, preprocess=True)}
-    from concurrent.futures import as_completed, Future, ThreadPoolExecutor
-    #? NOTE: rewrote this in a more explicit way to use a progress bar that updates properly
-    # TODO: need to add rate-limiting to domains, especially if we're fetching a lot of URLs concurrently and with domains grouped initially
+    #? Since requests releases the GIL lock during I/O, the ThreadPoolExecutor should be faster in this case.
     with tqdm(total = len(urls), colour="cyan", desc="Concurrently fetching webpage contents") as pbar:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures: Dict[Future, str] = {executor.submit(safe_fetch, url): url for url in urls}

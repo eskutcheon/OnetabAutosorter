@@ -52,6 +52,8 @@ class DomainFilterData:
 #? beware of inconsistent domain names since sometime's the base url root is extracted like `base_domain = sorted(domain.lower().split('.'), key=len)[-1]``
 
 
+# TODO: need to add an additional function to pass through after `filter_disjoint_boilerplate` to remove non-english words from the set to filter out
+
 class DomainBoilerplateFilter:
     """ Domain-wide TF-IDF based boilerplate detection and filtering. """
     def __init__(self, min_domain_samples=5, min_df_ratio=0.8, ngram_range=(2, 10), max_features=500):

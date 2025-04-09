@@ -1,30 +1,34 @@
-import os
+import os, sys
 import json
 from collections import defaultdict #, Counter
-from typing import Optional, Dict, List
-from tqdm import tqdm
+from typing import Optional, Dict, List, Literal, Callable, Union, Any
 # local imports
-from onetab_autosorter.scraper.scraper_utils import SupplementFetcher, default_html_fetcher_batch
 from onetab_autosorter.keyword_extraction import KeyBertKeywordModel
-from onetab_autosorter.parsers import OneTabParser, JSONParser
+from onetab_autosorter.parsers import OneTabParser, JSONParser, NetscapeBookmarkParser
 from onetab_autosorter.config.config import Config, get_cfg_from_cli
-from onetab_autosorter.utils.utils import deduplicate_entries, PythonSetEncoder
-##from onetab_autosorter.text_cleaning import DomainBoilerplateFilter
+from onetab_autosorter.utils.utils import detect_bookmark_format, deduplicate_entries, PythonSetEncoder
 from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
 from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
 from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
 
 
+
 def get_parser(file_path: str):
     ext = os.path.splitext(file_path)[1].lower()
     if ext == ".html":
-        return OneTabParser()
+        html_type = detect_bookmark_format(file_path)
+        if html_type == "onetab":
+            return OneTabParser()
+        elif html_type == "netscape":
+            return NetscapeBookmarkParser()
+        else:
+            raise ValueError(f"Unsupported HTML format: {html_type}")
     elif ext == ".json":
         return JSONParser()
     else:
         raise ValueError(f"Unsupported input format: {ext}")
 
-
+#~ later, this will be the first stage of the pipeline
 def load_entries(file_path: str, deduplicate: bool = True, max_url_len: int = 200) -> List[Dict]:
     parser = get_parser(file_path)
     entries = parser.parse(file_path)
@@ -36,9 +40,41 @@ def load_entries(file_path: str, deduplicate: bool = True, max_url_len: int = 20
 
 
 
+def get_fetcher_function(scraper_type: Union[Callable, Literal["java", "naive", "limited", "async"]] = "limited", **kwargs) -> Callable:
+    """ returns a "fetcher" function for webscraping supplementary text based on `scraper_type`
+        Args:
+            scraper_type (str): one of ["webscraper", "default", "java", "async"]
+            kwargs: additional parameters passed to WebScraper constructor
+        Returns:
+            Callable: a callable that accepts List[str] -> Dict[str, str]
+    """
+    if callable(scraper_type):
+        print("WARNING: scraper_type passed as a callable is untested and may lead to unexpected behavior.")
+        return scraper_type
+    if scraper_type == "limited":
+        from onetab_autosorter.scraper.webscraper import WebScraper
+        return WebScraper(**kwargs).fetch_batch
+    elif scraper_type == "java":
+        # TODO: still kinda just want to combine these files
+        from onetab_autosorter.scraper.launcher import ScraperServiceManager
+        from onetab_autosorter.scraper.client import fetch_summary_batch
+        scraper = ScraperServiceManager()
+        return scraper.fetch_within_context(fetch_summary_batch)
+    elif scraper_type == "naive":
+        from onetab_autosorter.scraper.scraper_utils import default_html_fetcher_batch
+        return default_html_fetcher_batch
+    elif scraper_type == "async":
+        from onetab_autosorter.scraper.webscraper import WebScraper
+        return WebScraper(**kwargs).run_async_fetch_batch
+    else:
+        raise ValueError(f"Invalid scraper type: {scraper_type}; expected one of ['java', 'naive', 'limited', 'async']")
+
+
+
+
 # TODO: split these two functions up to use a common interface for running the pipeline
 
-def run_pipeline(config: Config, fetcher_fn: Optional[SupplementFetcher] = None):
+def run_pipeline(config: Config, fetcher_fn: Optional[Callable] = None, **fetcher_kw):
     entries = load_entries(config.input_file, deduplicate=config.deduplicate, max_url_len=config.dedupe_url_max_len)
     kwargs = dict(
         model_name=config.model_name,
@@ -46,7 +82,7 @@ def run_pipeline(config: Config, fetcher_fn: Optional[SupplementFetcher] = None)
         top_k=config.keyword_top_k,
     )
     if fetcher_fn is not None:
-        kwargs['fetcher_fn'] = fetcher_fn
+        kwargs['fetcher_fn'] = get_fetcher_function(fetcher_fn, **fetcher_kw)
     keyword_model = KeyBertKeywordModel(**kwargs)
     if config.chunk_size > 1:
         entries = keyword_model.generate_with_chunking(entries, config.chunk_size)
@@ -59,61 +95,37 @@ def run_pipeline(config: Config, fetcher_fn: Optional[SupplementFetcher] = None)
 
 
 
-def run_pipeline_with_scraper(config: Config):
-    """ Run the pipeline with the Java-based scraper service for HTML webcrawling. """
-    from onetab_autosorter.scraper.client import fetch_summary_batch #, fetch_summary
-    from onetab_autosorter.scraper.launcher import ScraperServiceManager
-    scraper = ScraperServiceManager()
-    print("config output file: ", config.output_json)
-    try:
-        scraper.start()
-        run_pipeline(config, fetch_summary_batch)
-    finally:
-        scraper.stop()
-
-
-
 
 #################################################################################################
 # (NEW) Keyword Extraction + Domain Boilerplate Filtering Pipeline
 #################################################################################################
 
-#def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, sample_thresh=5, min_count=2) -> DomainBoilerplateFilter:
-def get_boilerplate_filter(filter_json_path: str = "", from_file: bool = False, **kwargs) -> DomainBoilerplateFilter:
-    # optionally load existing domain filter results from disk
-    if from_file and os.path.isfile(filter_json_path):
-        return DomainBoilerplateFilter.load_boilerplate_map(
-            filter_json_path,
-            **kwargs  # pass any additional keyword arguments to the constructor
-        )
-    return DomainBoilerplateFilter(**kwargs)  # create a new instance with the given parameters
-
 
 def create_and_run_domain_filter(
-    config: Config,
+    load_from_file: bool,
     domain_map: Dict[str, List[Dict]],
     json_path = os.path.join("output", "domain_boilerplate.json"),
     **kwargs
 ):
+    from onetab_autosorter.scraper.webscraper import WebScraper
     MIN_REPEAT_COUNT = 3
-    # instantiate domain filter object
-    domain_filter_obj = get_boilerplate_filter(
-        json_path,
-        from_file = config.init_domain_filter,
-        **kwargs
-    )
-    domain_filter_obj.run_preliminary_search(domain_map, MIN_REPEAT_COUNT, default_html_fetcher_batch)
+    # instantiate domain filter object and run the filter #? (we set the filter first because the keyword extractor expects locked domain keys)
+    domain_filter_obj = None
+    if load_from_file:
+        os.makedirs(os.path.dirname(json_path), exist_ok=True)
+        return DomainBoilerplateFilter.load_boilerplate_map(json_path, **kwargs)
+    else:
+        domain_filter_obj = DomainBoilerplateFilter(**kwargs)
+    scraper = WebScraper() #rate_limit_delay=1.2, max_workers=8)
+    domain_filter_obj.run_preliminary_search(domain_map, MIN_REPEAT_COUNT, scraper.fetch_batch) #default_html_fetcher_batch)
     #run_boilerplate_filtering(domain_filter_obj, domain_map)
-    #if config.init_domain_filter: # might make this a separate config argument later
     domain_filter_obj.save_boilerplate_map(json_path)
     return domain_filter_obj
 
 
-# TODO: if we added a way for someone to give their bookmark folder structure,
-    # it could be flattened and folder names could be used as the `seed_topic_list` for BERTTopic
 
-
-def run_pipeline_with_domain_filter(config: Config):
+#! work on getting rid of this next
+def run_pipeline_with_keybert(config: Config):
     """
         1) Parse the input file into entries and optionally remove duplicates
         2) Possibly load a saved domain -> boilerplate mapping (if config.init_domain_filter is True)
@@ -122,7 +134,6 @@ def run_pipeline_with_domain_filter(config: Config):
         5) Re-fetch or reuse the text, filter it, run KeyBERT, and produce final JSON
         6) Save updated domain filter if needed
     """
-    # TODO: combine all the domain filtering stuff into another convenience function to simplify arguments
     FILTER_THRESHOLD = 5
     MIN_DOMAIN_COUNT = 2
     filter_json_path = os.path.join("output", "domain_boilerplate.json")
@@ -131,35 +142,29 @@ def run_pipeline_with_domain_filter(config: Config):
     domain_map: Dict[str, List[Dict]] = defaultdict(list)
     for e in entries:
         domain_map[e["domain"]].append(e)
-    sorted_domains = sorted(domain_map.keys(), key=lambda d: len(domain_map[d]), reverse=True)
-    print("=== PASS 1: Accumulate and lock domain boilerplate. ===")
-    # instantiate domain filter object and run the filter #? (we set the filter first because the keyword extractor expects locked domain keys)
-    domain_filter_obj = create_and_run_domain_filter(config, sorted_domains, domain_map, FILTER_THRESHOLD, MIN_DOMAIN_COUNT, filter_json_path)
-    print("=== PASS 2: Keyword Extraction with domain-based filtering. ===")
-    # Re-fetch text; #?should probably store them in memory from the filtering, but it only fetches as many as needed
+    # instantiate domain filter object and run the filter (we set the filter first because the keyword extractor expects locked domain keys)
+    domain_filter_obj = create_and_run_domain_filter(
+        config.init_domain_filter,
+        domain_map,
+        filter_json_path,
+        min_domain_samples=FILTER_THRESHOLD,
+        #min_repeat_count=MIN_DOMAIN_COUNT,
+        ngram_range = (2, 10) # determines the n-gram range for boilerplate detection, e.g. (2,5) means phrases with 2-5 words are considered
+    )
+    del domain_map # free memory - variables not needed anymore
+    text_cleaner = TextCleaningFilter(ignore_patterns=config.compiled_filters)
+    preprocessor = TextPreprocessingHandler(domain_filter_obj, text_cleaner)
+    #!####################################################################################################################################
+    #! below hasn't been updated to the new structure - need to refactor KeyBertKeywordModel to use the new preprocessor and domain filter
+    #!####################################################################################################################################
     # Prepare KeyBERT
     keyword_model = KeyBertKeywordModel(
         model_name=config.model_name,
         top_k=config.keyword_top_k,
-        prefetch_factor=1  # or config.chunk_size if you want batch logic
+        preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
+        fetcher_fn = get_fetcher_function("naive")
     )
-    final_results = []
-    #!!! FIXME: no way in hell this runs in the future without rate-limiting - should also try to maximize time between request by the ordering
-    # do domain by domain again, or add single pass with chunking later
-    print("NOTE: Most frequent sites are processed in chunks first, so the estimated runtime will appear higher at the start.")
-    for domain in tqdm(sorted_domains, desc="Domain (Extraction Step)"):
-        domain_entries = domain_map[domain]
-        urls = [e["url"] for e in domain_entries]
-        text_map = default_html_fetcher_batch(urls)
-        # TODO: replace with constant-length chunking again later (should really just use `entries` directly)
-        for e in domain_entries:
-            raw_text = text_map.get(e["url"], "")
-            # filter boilerplate lines
-            filtered_text = domain_filter_obj.filter_boilerplate(domain, raw_text)
-            # run KeyBERT
-            processed = keyword_model.generate(e, supplement_text=filtered_text)
-            final_results.append(processed)
-    # save final JSON with keywords added to all entries
+    final_results = keyword_model.run(entries) #[]
     with open(config.output_json, "w", encoding="utf-8") as f:
         json.dump(final_results, f, indent=2, cls=PythonSetEncoder)
 
@@ -181,15 +186,14 @@ def run_pipeline_with_bertopic(config: Config):
     for e in entries:
         domain_map[e["domain"]].append(e)
     domain_filter = create_and_run_domain_filter(
-        config,
+        config.init_domain_filter,
         domain_map,
         filter_json_path,
         min_domain_samples=FILTER_THRESHOLD,
         #min_repeat_count=MIN_DOMAIN_COUNT,
-        #? NOTE: scales kinda badly
         ngram_range = (2, 10) # determines the n-gram range for boilerplate detection, e.g. (2,5) means phrases with 2-5 words are considered
     )
-    ###del domain_map, sorted_domains # free memory - variables not needed anymore
+    del domain_map # free memory - variables not needed anymore
     text_cleaner = TextCleaningFilter(ignore_patterns=config.compiled_filters)
     preprocessor = TextPreprocessingHandler(domain_filter, text_cleaner)
     # Create BERTTopic model with domain filtering + text truncation
@@ -209,10 +213,24 @@ def run_pipeline_with_bertopic(config: Config):
 
 
 
+
+##############################################################################################################
+# for the extension to using dataframes later:
+##############################################################################################################
+# will only be relevant using the tabular dataframe with output keywords for clustering later
+def _simulate_data_as_text(entry: Dict[str, Any]) -> str:
+    """ embed domain and group info into the text """
+    # TODO: move upstream since it's more key-dependent than I'd prefer
+    domain_label = entry["domain"].split(".")[-2]  # "wikipedia" or "linuxfoundation"
+    group_label = f"group_{entry['group_ids'][0]}" if entry["group_ids"] else ""
+    artificial_text = f"domain_{domain_label} - {group_label}"
+    return artificial_text.strip()  # return the simulated text for the entry, if no real text is available
+
+
+
 if __name__ == "__main__":
     config = get_cfg_from_cli()
     # defaults to False
-    if config.use_java_scraper:
-        print("Using Java-based scraper for HTML webcrawling.")
-        run_pipeline_with_scraper(config)
-    run_pipeline(config)
+    # TODO: make this a config option (to replace `use_java_scraper`) later:
+    fetcher_func = "java" if config.use_java_scraper else "limited"
+    run_pipeline(config, fetcher_func)
