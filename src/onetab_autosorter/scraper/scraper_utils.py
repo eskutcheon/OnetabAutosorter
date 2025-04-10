@@ -90,7 +90,7 @@ def safe_fetch(url: str, attempt=1, max_retries = 3, retry_delay = 2) -> str:
         text = default_html_fetcher(url)
         #? NOTE: apparently default_html_fetcher_batch is the only function calling this now so I'm just preparing by at least making a flag for it
         return text
-        # TODO: add preprocessing here to include it in the parallel execution
+        # TODO: add minor preprocessing here to include it in the parallel execution
     except Exception as e:
         if isinstance(e, (requests.exceptions.RequestException, urllib3.exceptions.ReadTimeoutError)):
             if attempt <= max_retries:

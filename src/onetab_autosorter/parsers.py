@@ -2,6 +2,7 @@ import os
 import re
 import json
 from tqdm import tqdm
+from termcolor import colored
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from datetime import datetime, timezone
@@ -181,6 +182,9 @@ class NetscapeBookmarkParser(BaseParser):
         # naming the primary root node for the folder structure "ROOT"
         root = FolderNode("ROOT")
         if root_dl:
+            print(colored("Extracting folder structure for candidate labels...", "green"))
             # extract folder structure starting from the root <DL>
             NetscapeBookmarkParser._extract_folder(root_dl, root)
+        else:
+            print(colored("WARNING: Folder extraction failed - no enclosing <dl> tag found", "yellow"))
         return root

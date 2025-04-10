@@ -2,6 +2,7 @@ import os, sys
 import json
 from collections import defaultdict #, Counter
 from typing import Optional, Dict, List, Literal, Callable, Union, Any
+import polars as pl
 # local imports
 from onetab_autosorter.keyword_extraction import KeyBertKeywordModel
 from onetab_autosorter.parsers import OneTabParser, JSONParser, NetscapeBookmarkParser
@@ -29,13 +30,15 @@ def get_parser(file_path: str):
         raise ValueError(f"Unsupported input format: {ext}")
 
 #~ later, this will be the first stage of the pipeline
-def load_entries(file_path: str, deduplicate: bool = True, max_url_len: int = 200) -> List[Dict]:
+def load_entries(file_path: str, deduplicate: bool = True, max_url_len: int = 200) -> List[Dict[str, Any]]:
     parser = get_parser(file_path)
     entries = parser.parse(file_path)
     if deduplicate:
         entries = deduplicate_entries(entries, max_length=max_url_len)
     if not entries:
         raise RuntimeError("No entries found in the input file.")
+    # for e in entries:
+    #     print(e)
     return entries
 
 
@@ -51,9 +54,11 @@ def get_fetcher_function(scraper_type: Union[Callable, Literal["java", "naive", 
     if callable(scraper_type):
         print("WARNING: scraper_type passed as a callable is untested and may lead to unexpected behavior.")
         return scraper_type
-    if scraper_type == "limited":
+    if scraper_type in ["limited", "async"]:
         from onetab_autosorter.scraper.webscraper import WebScraper
-        return WebScraper(**kwargs).fetch_batch
+        scraper = WebScraper(**kwargs) #rate_limit_delay=1.2, max_workers=8)
+        scrape_func = "run_async_fetch_batch" if scraper_type == "async" else "fetch_batch"
+        return getattr(scraper, scrape_func)
     elif scraper_type == "java":
         # TODO: still kinda just want to combine these files
         from onetab_autosorter.scraper.launcher import ScraperServiceManager
@@ -63,9 +68,6 @@ def get_fetcher_function(scraper_type: Union[Callable, Literal["java", "naive", 
     elif scraper_type == "naive":
         from onetab_autosorter.scraper.scraper_utils import default_html_fetcher_batch
         return default_html_fetcher_batch
-    elif scraper_type == "async":
-        from onetab_autosorter.scraper.webscraper import WebScraper
-        return WebScraper(**kwargs).run_async_fetch_batch
     else:
         raise ValueError(f"Invalid scraper type: {scraper_type}; expected one of ['java', 'naive', 'limited', 'async']")
 
@@ -127,12 +129,12 @@ def create_and_run_domain_filter(
 #! work on getting rid of this next
 def run_pipeline_with_keybert(config: Config):
     """
-        1) Parse the input file into entries and optionally remove duplicates
-        2) Possibly load a saved domain -> boilerplate mapping (if config.init_domain_filter is True)
-        3) Group entries by domain; fetch text for each domain to build up the domain filter
-        4) Lock in (finalize) boilerplate for each domain
-        5) Re-fetch or reuse the text, filter it, run KeyBERT, and produce final JSON
-        6) Save updated domain filter if needed
+        1. Parse the input file into entries and optionally remove duplicates
+        2. Possibly load a saved domain -> boilerplate mapping (if config.init_domain_filter is True)
+        3. Group entries by domain; fetch text for each domain to build up the domain filter
+        4. Lock in (finalize) boilerplate for each domain
+        5. Re-fetch or reuse the text, filter it, run KeyBERT, and produce final JSON
+        6. Save updated domain filter if needed
     """
     FILTER_THRESHOLD = 5
     MIN_DOMAIN_COUNT = 2
@@ -160,11 +162,15 @@ def run_pipeline_with_keybert(config: Config):
     # Prepare KeyBERT
     keyword_model = KeyBertKeywordModel(
         model_name=config.model_name,
+        candidate_labels=config.seed_kws if config.seed_kws else None,
         top_k=config.keyword_top_k,
         preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
         fetcher_fn = get_fetcher_function("naive")
     )
     final_results = keyword_model.run(entries) #[]
+    # TODO: add early parsing to drop empty entries
+    # TODO: need to add error catching for empty keywords
+    embedding_test(final_results, config)
     with open(config.output_json, "w", encoding="utf-8") as f:
         json.dump(final_results, f, indent=2, cls=PythonSetEncoder)
 
@@ -199,6 +205,7 @@ def run_pipeline_with_bertopic(config: Config):
     # Create BERTTopic model with domain filtering + text truncation
     topic_model = BERTTopicKeywordModel(
         model_name=config.model_name,
+        candidate_labels=config.seed_kws if config.seed_kws else None,
         nr_topics=None,       # or 'auto', or an integer
         preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
         fetcher_fn=None       # or default_html_fetcher_batch
@@ -226,6 +233,43 @@ def _simulate_data_as_text(entry: Dict[str, Any]) -> str:
     artificial_text = f"domain_{domain_label} - {group_label}"
     return artificial_text.strip()  # return the simulated text for the entry, if no real text is available
 
+
+
+
+def embedding_test(entries: List[Dict[str, Any]], config: Config):
+    from onetab_autosorter.embeddings import (
+        entries_to_dataframe,
+        enrich_with_metadata,
+        embed_column,
+        concatenate_embeddings,
+        cluster_hdbscan,
+        inject_cluster_results,
+        #generate_cluster_labels_from_keywords,
+        generate_cluster_labels_zero_shot,
+        #generate_cluster_labels_llm,
+        inject_generated_labels
+    )
+    df = entries_to_dataframe(entries)
+    print("top 10 entries: ", df.head(10))
+    df_meta = enrich_with_metadata(df)
+    print("top 10 metadata: ", df_meta.head(10))
+    embeddings = embed_column(df, "keywords_text")
+    print("embeddings shape: ", embeddings.shape)
+    print("embeddings: ", embeddings[:5])
+    combined = concatenate_embeddings(embeddings, df_meta.select(["kw_length", "domain_length", "group_count"]))
+    print("combined shape: ", combined.shape)
+    cluster_results = cluster_hdbscan(combined, min_cluster_size=5)
+    print("cluster results: ", cluster_results)
+    df_clustered = inject_cluster_results(df, cluster_results["labels"], cluster_results["scores"])
+    print("clustered df: ", df_clustered.head(10))
+    # Step 3: summarize
+    #df_labeled = generate_cluster_labels_from_keywords(df_clustered)
+    #print("labeled df: ", df_labeled.head(10))
+    #df_labeled.glimpse(max_items_per_column=5)
+    #label_map = generate_cluster_labels_llm(df_clustered, top_k=5)
+    label_map: pl.DataFrame = generate_cluster_labels_zero_shot(df_clustered, candidate_labels=config.seed_kws)
+    df_labeled = inject_generated_labels(df_clustered, label_map.to_dict())
+    df_labeled.glimpse(max_items_per_column=10, max_colname_length=160)
 
 
 if __name__ == "__main__":

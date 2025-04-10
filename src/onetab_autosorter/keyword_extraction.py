@@ -21,10 +21,12 @@ class BaseKeywordModel:
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
+        candidate_labels: Optional[List[str]] = None,
         preprocessor: Optional[TextPreprocessingHandler] = None,
         fetcher_fn: Optional[Callable] = None
     ):
         self.model_name = model_name
+        self.candidate_labels = candidate_labels
         self.preprocessor = preprocessor
         self.fetcher_fn = fetcher_fn
         self.is_connected = is_internet_connected()
@@ -92,6 +94,7 @@ class KeyBertKeywordModel(BaseKeywordModel):
     def __init__(
         self,
         model_name="all-MiniLM-L6-v2",
+        candidate_labels: Optional[List[str]] = None,
         top_k=10,
         preprocessor: Optional[TextPreprocessingHandler] = None,
         fetcher_fn : Optional[Callable] = None
@@ -103,6 +106,7 @@ class KeyBertKeywordModel(BaseKeywordModel):
             :param fetcher_fn: function to fetch summary text for each URL in batch
         """
         self.model = KeyBERT(model=model_name)
+        self.candidate_labels = candidate_labels
         self.top_k = top_k
         self.preprocessor = preprocessor
         # if fetcher_fn is None, set it to default fetcher based on prefetch_factor
@@ -119,6 +123,7 @@ class KeyBertKeywordModel(BaseKeywordModel):
             return entry
         raw = self.model.extract_keywords(
             text,
+            candidates=self.candidate_labels,
             keyphrase_ngram_range=(1, self.MAX_PHRASE_LENGTH),
             use_mmr=True,
             #use_maxsum=True,
@@ -193,6 +198,7 @@ class BERTTopicKeywordModel(BaseKeywordModel):
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
+        candidate_labels: Optional[List[str]] = None,
         nr_topics: Union[int, str, None] = None,
         preprocessor: Optional[TextPreprocessingHandler] = None,
         # MIGHT NOT BE ABLE TO USE THIS SINCE THE CONFIDENCE IS OFTEN ABOUT THIS LOW
@@ -214,11 +220,13 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             # custom_vectorizer = CountVectorizer(stop_words="english", token_pattern=r"(?u)\b[A-Za-z]+\b")
         self.topic_model = BERTopic(
             nr_topics = nr_topics, # can be an integer for number of topics or "auto" for automatic topic reduction
+            zeroshot_topic_list=candidate_labels,  # list of candidate labels for zero-shot topic modeling
             embedding_model = SentenceTransformer(model_name),
             calculate_probabilities = True,
             n_gram_range = (1, 3),  # unigrams, bigrams, and trigrams
             verbose = True
         )
+        #self.candidate_labels = candidate_labels
         # optionally store a preprocessor that handles text cleaning and domain filtering
         self.preprocessor = preprocessor
         # set the confidence threshold for topic probabilities

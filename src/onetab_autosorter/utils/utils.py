@@ -1,7 +1,9 @@
 import os
 import json
+import re
+from itertools import permutations
 from urllib.parse import urlparse
-from typing import List, Dict
+from typing import List, Dict, Set
 from collections import defaultdict
 
 
@@ -10,6 +12,55 @@ class PythonSetEncoder(json.JSONEncoder):
         if isinstance(obj, set):
             return list(obj)
         return super().default(obj)
+
+
+DEFAULT_IGNORE_FOLDER_NAMES = ["bookmark", "folder", "stuff", "link", "site", "website", "bar", "toolbar", "page", "menu", "list", "untitled", "other"]
+
+def generate_ignored_regex(ignored_words: List[str]) -> str:
+    """ Generate a regex pattern to match all plural forms and combinations of ignored words.
+        Args:
+            ignored_words (List[str]): List of single words to ignore.
+        Returns:
+            str: A regex pattern that matches all combinations and plural forms.
+    """
+    # add plural forms of each word manually since re.escape escapes the ? and destroys the regex pattern
+    words_with_plural = [word + suffix for suffix in ["", "s"] for word in ignored_words]
+    # generate all permutations of 1 or 2 words
+    all_combinations = set()
+    #! Careful with this because for n-grams with range (1,n) and M list elements, permutations grow exponentially as O(M^n)
+    for i in range(1, 3):  # ngram-range of 1-2
+        all_combinations.update([" ".join(p) for p in permutations(words_with_plural, i)])
+    # Escape special characters and join combinations into a regex pattern
+    escaped_combinations = [re.escape(comb) for comb in all_combinations]
+    pattern = r"\b(" + "|".join(escaped_combinations) + r")\b"
+    return pattern
+
+
+def get_keywords_from_paths(folder_list: List[str], max_depth: int = 4) -> Set[str]:
+    """ Extract keywords from folder paths, filtering out ignored words and their combinations.
+        Args:
+            folder_list (List[str]): List of folder paths.
+            max_depth (int): Maximum depth of folder paths to consider.
+            ignored_words (List[str]): List of single words to ignore.
+        Returns:
+            Set[str]: Set of filtered keywords.
+    """
+    # generate the regex pattern for all permutations of ignored words
+    ignored_regex = generate_ignored_regex(DEFAULT_IGNORE_FOLDER_NAMES)
+    print("ignored regex pattern: ", ignored_regex)
+    print("number of ignored regex patterns: ", len(ignored_regex.split("|")))
+    # helper function to extract the final folder name and filter out ignored words
+    def filter_name(folder_name: str) -> str:
+        print("initial folder path: ", folder_name)
+        subfolders = folder_name.split("/")[:max_depth]
+        filtered = subfolders[-1].strip().lower()
+        # use regex to remove ignored words and their combinations
+        filtered = re.sub(ignored_regex, "", filtered, flags=re.IGNORECASE).strip()
+        return filtered
+    folder_set = set([filter_name(folder) for folder in folder_list])
+    folder_set.discard("")      # remove empty strings if present
+    # TODO: should filter stopwords here too since they may be all that's left after filtering
+    return folder_set
 
 
 class FolderNode:
@@ -29,6 +80,14 @@ class FolderNode:
         for child in self.children:
             paths.extend(child.to_list(full_path))
         return paths
+
+    def extract_as_keywords(self, depth: int = 4, prefix="") -> List[str]:
+        """ Extracts the folder names as keywords prepared for the extraction models """
+        # convert to list with path-like strings then, extract the final folder name and filter it while removing duplicates
+        folder_list = self.to_list(prefix)
+        folder_list = list(map(lambda x: x.replace("ROOT/", "", 1), folder_list)) # remove the ROOT prefix from the paths before further filtering
+        folder_set = get_keywords_from_paths(folder_list, depth)
+        return list(folder_set)
 
 
 
@@ -67,7 +126,6 @@ def deduplicate_entries(entries: List[Dict], max_length: int = 200) -> List[Dict
             if url in seen:
                 seen[url]["group_ids"].update(entry["group_ids"], set())
             else:
-                # new addition:
                 entry["group_ids"] = set(entry.get("group_ids", set()))
                 seen[url] = entry.copy()
                 final_entries.append(entry)
