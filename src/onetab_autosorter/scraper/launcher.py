@@ -2,7 +2,10 @@ import os
 import subprocess
 import requests
 import time
-import signal
+#import signal
+from functools import wraps
+import atexit
+from typing import Callable
 
 JAR_PATH = os.path.abspath("micronaut_scraper/build/libs/micronaut-scraper-all.jar")
 print("JAR_PATH:", JAR_PATH)
@@ -54,3 +57,21 @@ class ScraperServiceManager:
                 print("Force killing scraper process...")
                 #print("⚠ Force killing scraper process...")
                 self.process.kill()
+
+    def __enter__(self):
+        self.start()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop()
+
+
+    def fetch_within_context(self, fetcher_fn: Callable):
+        """ allows interfacing with the Java-based scraper service within a context manager in the same way as the Python implementations """
+        self.start()  # start the service
+        atexit.register(self.stop)  # ensure the service is stopped when the program exits
+        #~ could register the self.stop() call with atexit.register, but it may stay open longer than necessary
+        @wraps(fetcher_fn)
+        def wrapper(*args, **kwargs):
+            return fetcher_fn(*args, **kwargs)
+        return wrapper

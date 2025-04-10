@@ -29,3 +29,4 @@ def fetch_batch(urls: List[str]) -> Dict[str, str]:
     except Exception as e:
         print(f"Batch fetch failed: {e}")
     return {}
+
