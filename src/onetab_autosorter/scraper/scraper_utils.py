@@ -12,7 +12,7 @@ from tqdm.auto import tqdm
 from itertools import islice
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning, Tag
 from typing import List, Dict
-#from onetab_autosorter.utils.clean_utils import preprocess_html_text
+#from onetab_autosorter.utils.utils import preprocess_html_text
 
 
 
@@ -31,11 +31,9 @@ def strip_soup(soup: BeautifulSoup) -> BeautifulSoup:
 
 
 #& may keep this here or move it to the general TextCleaningFilter class later
-def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 200) -> str:
+def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 500) -> str:
     """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
-    # first remove script and style tags
-    # for tag in soup(["script", "style", "noscript"]):
-    #     tag.decompose()
+    # use islice over the iterator of significant strings to limit the number of tokens returned
     text = list(islice(soup.stripped_strings, 0, max_tokens))
     #text = soup.get_text(separator="\n", strip=True).split()
     #text_len = len(text)
@@ -63,7 +61,6 @@ def default_html_fetcher(url: str) -> str:
     #& if moving to using the filtering classes, this should probably just pass back a tuple of (soup, metadata)
         # then text can be extracted upstream in the main processing pipeline
     return fetch_full_text(soup)
-    #return preprocess_html_text(raw_text)
 
 
 def write_failed_fetch_log(url: str, error: str):

@@ -1,17 +1,12 @@
 import os
 import json
 import re
+from thefuzz import fuzz
 from itertools import permutations
 from urllib.parse import urlparse
-from typing import List, Dict, Set
+from typing import List, Dict, Set, Union, Set, Optional, Any
 from collections import defaultdict
 
-
-class PythonSetEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if isinstance(obj, set):
-            return list(obj)
-        return super().default(obj)
 
 
 DEFAULT_IGNORE_FOLDER_NAMES = ["bookmark", "folder", "stuff", "link", "site", "website", "bar", "toolbar", "page", "menu", "list", "untitled", "other"]
@@ -156,3 +151,23 @@ def is_internet_connected(host="8.8.8.8", port=53, timeout=3, vpn_host=None, vpn
             except OSError:
                 pass
         return False
+
+
+def _remove_near_duplicates(lines: List[str], threshold: int = 85) -> list[str]:
+    if not lines:
+        return []
+    # returns just the first line if it's only one
+    output = [lines[0]]
+    for line in lines[1:]:
+        # TODO: look into using a partial ratio or token_sort_ratio for better near-duplicate detection
+        if all(fuzz.ratio(line, seen) < threshold for seen in output):
+            output.append(line)
+    return output
+
+def preprocess_html_text(raw: Union[str, List[str]]) -> str:
+    # remove near-duplicate lines, then drop short or spammy lines
+    lines = raw.splitlines() if isinstance(raw, str) else raw
+    #!!! Consider removing in favor of TF-IDF approach
+    lines = _remove_near_duplicates(lines)
+    text = "\n".join(lines) # _clean_text(lines)
+    return text

@@ -2,14 +2,13 @@
 import os
 import re
 import nltk
-# from itertools import islice
 from typing import Optional, Union, List, Any, Set
 # NLP tools
 # from langdetect import detect, LangDetectException
 from nltk.tokenize import word_tokenize
 from nltk.corpus import stopwords
 # local imports
-# import onetab_autosorter.config.patterns_registry as pattern_cfg
+
 
 
 
@@ -20,9 +19,6 @@ class TextCleaningFilter:
         - Removes optional advanced patterns (like LaTeX, citations, or non-English chars)
         - Performs stopword removal
     """
-    # DEFAULT_STOPWORDS_FILE = r"resources/nltk_stopwords.txt"  # default path to stopwords file
-    # # support for removing unwanted patterns like LaTeX expressions, citations in brackets, and Non-English characters (non-ASCII or a certain set)
-
     def __init__(
         self,
         min_word_count: int = 3,  # minimum number of words in a line to keep it (for spammy line removal)

@@ -20,8 +20,6 @@ def filter_disjoint_boilerplate(phrases: List[str]) -> Set[str]:
         Returns:
             List[str]: Filtered list of disjoint boilerplate phrases.
     """
-    # #! FOR DEBUGGING - remove later:
-    # num_phrases = len(phrases)
     phrases = set(sorted(phrases, key=len, reverse=True))
     selected_phrases = set()
     tokens_seen = set()
@@ -142,13 +140,14 @@ class DomainBoilerplateFilter:
             print(termcolor.colored(f"WARNING '{domain}' filtered text is the same as original text!", color="yellow"))
         return filtered_text.strip()
 
-    def save_boilerplate_map(self, json_path: str):
-        out_data = {domain: sorted(list(data.boilerplate)) for domain, data in self.domain_data_map.items()}
-        if not out_data:
-            print(termcolor("WARNING: domain boilerplate data empty when saving to JSON!", color="yellow"))
-        with open(json_path, "w", encoding="utf-8") as f:
-            json.dump(out_data, f, indent=2)
-        print(termcolor.colored(f"Saved extracted domain boilerplate to {json_path}.", color="green"))
+    def save_boilerplate_map(self, json_path: str, override: bool = False):
+        if override or not os.path.exists(json_path):
+            out_data = {domain: sorted(list(data.boilerplate)) for domain, data in self.domain_data_map.items()}
+            if not out_data:
+                print(termcolor("WARNING: domain boilerplate data empty when saving to JSON!", color="yellow"))
+            with open(json_path, "w", encoding="utf-8") as fptr:
+                json.dump(out_data, fptr, indent=2)
+            print(termcolor.colored(f"Saved extracted domain boilerplate to {json_path}.", color="green"))
 
     @classmethod
     def load_boilerplate_map(cls, json_path: str, **kwargs):

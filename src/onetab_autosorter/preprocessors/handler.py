@@ -1,6 +1,8 @@
 
 from typing import Optional, Dict
 from bs4 import BeautifulSoup
+from tqdm.auto import tqdm
+from typing import List, Dict, Any, Optional
 
 # Suppose we import or define these somewhere:
 from .domain_filter import DomainBoilerplateFilter
@@ -100,8 +102,62 @@ class TextPreprocessingHandler:
             tokens = tokens[: self.max_tokens]
         return " ".join(tokens)
 
-    # !!! Seemingly not used - need to do a check on the domain filter's data dictionary and call it if needed
-    def finalize_domain_filter(self):
-        """ forcibly finalize domain filter if needed. """
-        if self.domain_filter:
-            self.domain_filter.force_finalize_all()
+    # # !!! Seemingly not used - need to do a check on the domain filter's data dictionary and call it if needed
+    # def finalize_domain_filter(self):
+    #     """ forcibly finalize domain filter if needed. """
+    #     if self.domain_filter:
+    #         self.domain_filter.force_finalize_all()
+
+    def process_batch_html(self, html_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
+        """ Process multiple HTML documents in batch.
+            Args:
+                html_map: Dict mapping URLs to HTML content
+                domain_map: Dict mapping URLs to domain names
+            Returns:
+                Dict mapping URLs to processed text
+        """
+        results = {}
+        for url, html in tqdm(html_map.items(), desc="Processing HTML batch"):
+            domain = domain_map.get(url, "")
+            processed = self.process_html(html, domain)
+            results[url] = processed
+        return results
+
+    def process_batch_text(self, text_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
+        """ Process multiple text documents in batch.
+            Args:
+                text_map: Dict mapping URLs to text content
+                domain_map: Dict mapping URLs to domain names
+            Returns:
+                Dict mapping URLs to processed text
+        """
+        results = {}
+        for url, text in tqdm(text_map.items(), desc="Processing text batch"):
+            domain = domain_map.get(url, "")
+            processed = self.process_text(text, domain)
+            results[url] = processed
+        return results
+
+    def process_entries(self, entries: List[Dict[str, Any]], content_map: Dict[str, str]) -> List[Dict[str, Any]]:
+        """ Process a list of entries with their content.
+            Args:
+                entries: List of entry dictionaries
+                content_map: Dict mapping URLs to content (HTML or text)
+            Returns:
+                The updated list of entries with processed content
+        """
+        for entry in tqdm(entries, desc="Processing entries"):
+            url = entry["url"]
+            domain = entry.get("domain", "")
+            content = content_map.get(url, "")
+            if content:
+                # Determine if content is HTML or plain text
+                is_html = bool(content.strip().startswith(("<html", "<!DOCTYPE", "<doc")))
+                if is_html:
+                    processed = self.process_html(content, domain)
+                else:
+                    processed = self.process_text(content, domain)
+                entry["processed_text"] = processed
+            else:
+                entry["processed_text"] = ""
+        return entries

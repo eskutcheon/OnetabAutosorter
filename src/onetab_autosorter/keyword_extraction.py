@@ -11,10 +11,28 @@ from keybert import KeyBERT
 from bertopic import BERTopic
 from sentence_transformers import SentenceTransformer
 # local imports
-from onetab_autosorter.utils.utils import is_internet_connected
-from onetab_autosorter.scraper.scraper_utils import default_html_fetcher, default_html_fetcher_batch
-from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
-from onetab_autosorter.utils.clean_utils import get_base_title_text
+# from onetab_autosorter.utils.utils import is_internet_connected
+# from onetab_autosorter.scraper.scraper_utils import default_html_fetcher, default_html_fetcher_batch
+# from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
+
+
+
+# TODO: short term plan is to extricate all the data cleaning and boilerplate filtering from the keyword models and put them in their own pipeline stage
+# then I need to revise KeyBERT to accept all "documents" in one go, rather than one-by-one, since it should give slightly better results
+
+
+
+def get_base_title_text(entry: Dict[str, Any]) -> str:
+    """ strips out domain tokens from the page title to reduce noise in KeyBERT extraction """
+    title = entry.get("title", "")
+    domain = entry.get("domain", "")
+    if not domain: # really shouldn't happen, but just in case
+        return title.strip()
+    # Remove domain tokens from title before keyword extraction
+    # TODO: replace with a argmax approach later for efficiency
+    base_domain = sorted(domain.lower().split('.'), key=len)[-1]
+    pattern = r'\b' + re.escape(base_domain) + r'\b'
+    return re.sub(pattern, '', title, flags=re.IGNORECASE).strip()
 
 
 class BaseKeywordModel:
@@ -22,21 +40,19 @@ class BaseKeywordModel:
         self,
         model_name: str = "all-MiniLM-L6-v2",
         candidate_labels: Optional[List[str]] = None,
-        preprocessor: Optional[TextPreprocessingHandler] = None,
-        fetcher_fn: Optional[Callable] = None
+        # preprocessor: Optional[TextPreprocessingHandler] = None,
+        # fetcher_fn: Optional[Callable] = None
     ):
         self.model_name = model_name
         self.candidate_labels = candidate_labels
-        self.preprocessor = preprocessor
-        self.fetcher_fn = fetcher_fn
-        self.is_connected = is_internet_connected()
-        if not self.is_connected:
-            print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
+        # self.preprocessor = preprocessor
+        # self.fetcher_fn = fetcher_fn
+        # self.is_connected = is_internet_connected()
+        # if not self.is_connected:
+        #     print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
 
     @staticmethod
     def refine_keywords(keywords: List[Tuple[str, float]], min_score: float = 0.2) -> Dict[str, float]:
-        # TODO: add Levenshtein similarity ratios back in to filter extremely similar keywords
-            # e.g. for Wikipedia's "Koch Snowflake" page with "koch snowflake limits" and "koch snowflake limit" - problem only appeared when using maxsum with KeyBERT
         """ Refines a list of (keyword, score) pairs by removing low scores, redundancy, and token overlap. """
         seen_tokens = set()
         refined = {}
@@ -53,6 +69,7 @@ class BaseKeywordModel:
             seen_tokens.update(tokens)
         return refined
 
+    # might remove this in favor of a more general-purpose JSON saving utility function, but this can still be used for now
     @staticmethod
     def dump_json(data: Dict, path: str, label: str = ""):
         try:
@@ -70,15 +87,16 @@ class BaseKeywordModel:
         title_str = get_base_title_text(entry)
         # merge the cleaned/filtered text
         combined = (title_str + " " + raw_text).strip()
-        final_text = self._preprocess_text(domain, combined)
-        return final_text.strip()  # ensure no leading/trailing whitespace is left
+        return combined
+        # final_text = self._preprocess_text(domain, combined)
+        # return final_text.strip()  # ensure no leading/trailing whitespace is left
 
-    def _preprocess_text(self, domain: str, full_text: str) -> str:
-        """ Apply domain-level boilerplate filtering (if domain is locked) and then truncate to max_tokens """
-        if self.preprocessor:
-            # If domain is locked or partially locked, do the filtering - filter_boilerplate() will be a no-op if domain isn't locked yet
-            full_text = self.preprocessor.process_text(full_text, domain, use_domain_filter=True)
-        return full_text
+    # def _preprocess_text(self, domain: str, full_text: str) -> str:
+    #     """ Apply domain-level boilerplate filtering (if domain is locked) and then truncate to max_tokens """
+    #     if self.preprocessor:
+    #         # If domain is locked or partially locked, do the filtering - filter_boilerplate() will be a no-op if domain isn't locked yet
+    #         full_text = self.preprocessor.process_text(full_text, domain, use_domain_filter=True)
+    #     return full_text
 
     def run(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         raise NotImplementedError("Subclasses must implement this method.")
@@ -96,8 +114,8 @@ class KeyBertKeywordModel(BaseKeywordModel):
         model_name="all-MiniLM-L6-v2",
         candidate_labels: Optional[List[str]] = None,
         top_k=10,
-        preprocessor: Optional[TextPreprocessingHandler] = None,
-        fetcher_fn : Optional[Callable] = None
+        # preprocessor: Optional[TextPreprocessingHandler] = None,
+        # fetcher_fn : Optional[Callable] = None
     ):
         """
             :param model_name: e.g. "all-MiniLM-L6-v2" (for the underlying sentence-transformer in KeyBERT)
@@ -108,12 +126,12 @@ class KeyBertKeywordModel(BaseKeywordModel):
         self.model = KeyBERT(model=model_name)
         self.candidate_labels = candidate_labels
         self.top_k = top_k
-        self.preprocessor = preprocessor
-        # if fetcher_fn is None, set it to default fetcher based on prefetch_factor
-        self.fetcher_fn = fetcher_fn #or (default_html_fetcher if self.prefetch_factor == 1 else default_html_fetcher_batch)
-        self.is_connected = is_internet_connected()
-        if not self.is_connected:
-            print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
+        # self.preprocessor = preprocessor
+        # # if fetcher_fn is None, set it to default fetcher based on prefetch_factor
+        # self.fetcher_fn = fetcher_fn #or (default_html_fetcher if self.prefetch_factor == 1 else default_html_fetcher_batch)
+        # self.is_connected = is_internet_connected()
+        # if not self.is_connected:
+        #     print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
 
 
     def generate(self, entry: Dict[str, Any], supplement_text: Optional[str] = None) -> Dict[str, Any]:
@@ -127,7 +145,7 @@ class KeyBertKeywordModel(BaseKeywordModel):
             keyphrase_ngram_range=(1, self.MAX_PHRASE_LENGTH),
             use_mmr=True,
             #use_maxsum=True,
-            nr_candidates=20,   # TODO: might want to make this derived from the text length in some way
+            #nr_candidates=20,
             stop_words="english",
             top_n=self.top_k
         )
@@ -150,37 +168,43 @@ class KeyBertKeywordModel(BaseKeywordModel):
         """ Process entries in batch with pre-fetched supplemental summaries (with either Python or Java backend) """
         return deque(self._generate_stream(entries, summaries))
 
-    #? NOTE: chunking will be slower than single fetches until I remove the conditional logic in `_append_supplementary_text`
-    def generate_with_chunking(self, entries: List[Dict[str, Any]], chunk_size: int = 20) -> deque:
-        """ Chunk entries and process with batch fetching """
-        full_results = deque()
-        for i in tqdm(range(0, len(entries), chunk_size), desc="Keyword extraction of entries in chunks", unit="chunk"):
-            chunk = entries[i:i+chunk_size]
-            summaries = None
-            if self.is_connected and self.fetcher_fn:
-                summaries = self.fetcher_fn([e["url"] for e in chunk])
-                #print("SUMMARY KEYS: ", summaries.keys() if summaries else "No summaries fetched")
-            full_results.extend(self.generate_batch(chunk, summaries))
-        return full_results
+    # #? NOTE: chunking will be slower than single fetches until I remove the conditional logic in `_append_supplementary_text`
+    #& thankfully nothing currently uses this function, so I don't have to worry about extricating the fetching logic
+    # def generate_with_chunking(self, entries: List[Dict[str, Any]], chunk_size: int = 20) -> deque:
+    #     """ Chunk entries and process with batch fetching """
+    #     full_results = deque()
+    #     for i in tqdm(range(0, len(entries), chunk_size), desc="Keyword extraction of entries in chunks", unit="chunk"):
+    #         chunk = entries[i:i+chunk_size]
+    #         summaries = None
+    #         if self.is_connected and self.fetcher_fn:
+    #             summaries = self.fetcher_fn([e["url"] for e in chunk])
+    #             #print("SUMMARY KEYS: ", summaries.keys() if summaries else "No summaries fetched")
+    #         full_results.extend(self.generate_batch(chunk, summaries))
+    #     return full_results
 
 
     def run(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ Unified runner that fetches, extracts keywords, and prepares data for downstream embedding or clustering """
         # providing this to have a common interface with BERTTopic - should still call one of the generator functions
-        if not self.fetcher_fn:
-            raise RuntimeError("No fetcher_fn provided to fetch supplemental text.")
-        urls = [entry["url"] for entry in entries]
-        summaries = self.fetcher_fn(urls)
-        if not summaries:
-            print(colored("Warning: No summaries returned from fetcher.", "yellow"))
-            summaries = {url: "" for url in urls}
+        # if not self.fetcher_fn:
+        #     raise RuntimeError("No fetcher_fn provided to fetch supplemental text.")
+        # urls = [entry["url"] for entry in entries]
+        # summaries = self.fetcher_fn(urls)
+        # if not summaries:
+        #     print(colored("Warning: No summaries returned from fetcher.", "yellow"))
+        #     summaries = {url: "" for url in urls}
         updated = []
+        # TODO: still want to overhaul much of this class to allow the entire corpus to be passed in at once
         for entry in tqdm(entries, desc="Running KeyBERT", unit="entry"):
-            summary = summaries.get(entry["url"], "")
-            updated_entry = self.generate(entry, supplement_text=summary)
+            #summary = summaries.get(entry["url"], "")
+            summary = entry.get("scraped_text", "")
+            # TODO: eliminate summary argument later - doing this for testing purposes
+            updated_entry = self.generate(entry, summary) #, supplement_text=summary)
             updated.append(updated_entry)
-        # TODO (later): convert to DataFrame + embed + cluster
         return updated
+
+
+
 
 
 
@@ -200,10 +224,10 @@ class BERTTopicKeywordModel(BaseKeywordModel):
         model_name: str = "all-MiniLM-L6-v2",
         candidate_labels: Optional[List[str]] = None,
         nr_topics: Union[int, str, None] = None,
-        preprocessor: Optional[TextPreprocessingHandler] = None,
+        # preprocessor: Optional[TextPreprocessingHandler] = None,
         # MIGHT NOT BE ABLE TO USE THIS SINCE THE CONFIDENCE IS OFTEN ABOUT THIS LOW
         sort_confidence_threshold = 0.01,  # threshold for sorting topic confidence scores #! setting threshold low while experimenting - update later
-        fetcher_fn: Optional[Callable] = None
+        # fetcher_fn: Optional[Callable] = None
     ):
         """
             :param model_name: e.g. "all-MiniLM-L6-v2" (for the underlying sentence-transformer in BERTopic)
@@ -226,17 +250,18 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             n_gram_range = (1, 3),  # unigrams, bigrams, and trigrams
             verbose = True
         )
-        #self.candidate_labels = candidate_labels
-        # optionally store a preprocessor that handles text cleaning and domain filtering
-        self.preprocessor = preprocessor
         # set the confidence threshold for topic probabilities
         self.topic_prob_threshold = sort_confidence_threshold
-        # for optional text fetching in a single batch
-        self.fetcher_fn = fetcher_fn or default_html_fetcher_batch
-        self.is_connected = is_internet_connected()
-        if not self.is_connected:
-            # TODO: might be better to raise a Runtime error since we otherwise would have practically nothing to go on
-            print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
+        #self.candidate_labels = candidate_labels
+        # optionally store a preprocessor that handles text cleaning and domain filtering
+        # TODO: remove preprocessors from the keyword model classes to integrate them as their own pipeline stages
+        # self.preprocessor = preprocessor
+        # # for optional text fetching in a single batch
+        # self.fetcher_fn = fetcher_fn or default_html_fetcher_batch
+        # self.is_connected = is_internet_connected()
+        # if not self.is_connected:
+        #     # TODO: might be better to raise a Runtime error since we otherwise would have practically nothing to go on
+        #     print(colored('WARNING: No internet connection detected. Supplemental HTML fetching will be disabled.', color="yellow"))
 
     def _add_topics_to_entries(self, entries: List[Dict[str, Any]], all_topics: Dict[str, Tuple[str, float]], topics: List[int], probs: np.ndarray) -> None:
         for entry, topic_id, prob in zip(entries, topics, probs):
@@ -264,21 +289,24 @@ class BERTTopicKeywordModel(BaseKeywordModel):
             4. Assign each entry's topic_id + top topic keywords in the 'topic_keywords' field.
         """
         # 1) Possibly fetch all text in one batch
-        summaries_map = {}
+        ###### summaries_map = {}
         #print(colored("Fetching webpage content of all urls...", color="green"))
-        if self.is_connected and self.fetcher_fn:
-            urls = [e["url"] for e in entries]
-            # fetch text for each URL (e.g. domain-filtered or raw HTML)
-            summaries_map = self.fetcher_fn(urls)
-        #self.dump_json(summaries_map, "output/sample_text_log10.json", label="Raw summaries")
-        # 2) Build corpus
+        # if self.is_connected and self.fetcher_fn:
+        #     urls = [e["url"] for e in entries]
+        #     # fetch text for each URL (e.g. domain-filtered or raw HTML)
+        #     summaries_map = self.fetcher_fn(urls)
+        # #self.dump_json(summaries_map, "output/sample_text_log10.json", label="Raw summaries")
+        # # 2) Build corpus
+        corpus = []
         for e in tqdm(entries, desc="Cleaning Entries for Corpus"):
             # Get the text from summaries_map if present, else empty
-            raw_text = summaries_map.get(e["url"], "")
+            #raw_text = summaries_map.get(e["url"], "")
+            raw_text = e.get("scraped_text", "")
             doc_text = self._prep_for_extraction(e, raw_text)
-            summaries_map[e["url"]] = doc_text  # update the map with the cleaned text
-        self.dump_json(summaries_map, "output/sample_cleaned_log11.json", label="Cleaned summaries")
-        corpus = list(summaries_map.values())  # list of cleaned text for each entry
+            ###### summaries_map[e["url"]] = doc_text  # update the map with the cleaned text
+            corpus.append(doc_text)
+        #self.dump_json(summaries_map, "output/sample_cleaned_log11.json", label="Cleaned summaries")
+        ###### corpus = list(summaries_map.values())  # list of cleaned text for each entry
         # 3) Run .fit_transform
         print(colored("Fitting corpus to the topic model...", color="green"))
         # topics: List[int], probs: np.ndarray
