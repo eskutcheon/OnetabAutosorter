@@ -8,13 +8,19 @@ from pprint import pprint
 
 DEFAULT_YAML_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), r"default_filter_order.yaml")
 SCRAPER_OPTIONS = ["none", "limited", "java", "naive", "async"]
+KEYWORD_MODEL_REGISTRY = ["keybert", "bertopic"]
 
 @dataclass
 class CheckpointSettings:
-    reuse_parsed: bool = True
-    reuse_scraped: bool = True
-    reuse_cleaned: bool = True
+    # TODO: make a namedtuple or something for each pair of reuse/save settings along with default directory paths
+    reuse_parsed: bool = False
+    reuse_scraped: bool = False
+    reuse_cleaned: bool = False
     reuse_final_output: bool = False
+    #! skipping adding the next couple attributes to the parser arguments for now
+    reuse_keywords: bool = False
+    save_keywords: bool = True
+    #reuse_embeddings: bool = False
     override_boilerplate: bool = False
     save_parsed: bool = False
     save_scraped: bool = False
@@ -22,8 +28,16 @@ class CheckpointSettings:
     save_final_output: bool = True
     cache_dir: str = "cache"
 
+    def __post_init__(self):
+        # TODO: eventually replace this with setting the (relative) root directory with cache_dir
+        self.default_paths = DefaultPaths()
+        # ensure the cache directory exists
+        if not os.path.exists(self.cache_dir):
+            os.makedirs(self.cache_dir)
 
-@dataclass
+
+#! [CHANGE LATER] making this frozen for now, so users won't be able to modify the default paths
+@dataclass(frozen=True)
 class DefaultPaths:
     #! UNUSED FOR NOW - still need to work out how to use these while allowing for dynamic filenames
     # TODO: want to keep these default directories but make the filenames more dynamic
@@ -35,6 +49,8 @@ class DefaultPaths:
     keyword_data: str = os.path.join("output", "with_keywords", "keyword_data.json")
     embeddings: str = os.path.join("output", "embeddings", "embeddings.json")
     clustered: str = os.path.join("output", "sorted", "sorted_entries.json")
+
+
 
 
 @dataclass
@@ -51,9 +67,11 @@ class Config:
     output_json: str = r"output/cleaned_output.json"
     model_name: str = "all-MiniLM-L6-v2"
     keyword_top_k: int = 10
-    deduplicate: bool = False
+    deduplicate: bool = True
     scraper_type: str = "limited"  # choose from SCRAPER_OPTIONS
+    keyword_model: str = "keybert"  # choose from KEYWORD_MODEL_REGISTRY
     chunk_size: int = 30  # Number of entries to process in each chunk
+    max_tokens: int = 400 # max number of tokens to retain in each entry
     #& replacing with CheckpointSettings.override_boilerplate but still using it for now
     init_domain_filter: bool = False # whether to initialize the domain filter results from previous runs
     filter_config_path: Optional[str] = DEFAULT_YAML_PATH # path to the YAML file of ordered regex filter patterns)
@@ -66,8 +84,14 @@ class Config:
         # ensure chunk_size is a positive integer
         if self.chunk_size < 1:
             raise ValueError("chunk_size must be a positive integer.")
+        if self.max_tokens < 10:
+            raise ValueError("max_tokens must be a positive integer >= 10.")
         if self.scraper_type.lower() not in ["none", "limited", "java", "naive", "async"]:
             raise ValueError(f"Invalid scraper type: {self.scraper_type}. Must be one of {SCRAPER_OPTIONS}!")
+        if self.keyword_model.lower() not in KEYWORD_MODEL_REGISTRY:
+            if self.keyword_model.lower() == "BERTopic":
+                raise ValueError("it's spelled BERTopic, not BERTopic - adding this error for clarity")
+            self.keyword_model = "keybert"
         # ensure the output path exists
         output_dir = os.path.dirname(self.output_json)
         if output_dir and not os.path.exists(output_dir):
@@ -115,7 +139,9 @@ def get_cfg_from_cli():
     parser.add_argument("--top_k", type=int, default=10, help="Top K keywords")
     parser.add_argument("--deduplicate", action="store_true", help="Deduplicate URLs")
     parser.add_argument("--scraper_type", type=str, default="limited", choices=SCRAPER_OPTIONS, help=f"Type of webscraper to use from {SCRAPER_OPTIONS}")
+    parser.add_argument("--keyword_model", type=str, default="keybert", choices=KEYWORD_MODEL_REGISTRY, help=f"Keyword extraction model to use from {KEYWORD_MODEL_REGISTRY}")
     parser.add_argument("--chunk_size", type=int, default=50, help="Number of entries to process in each chunk (for webcrawling)")
+    parser.add_argument("--max_tokens", type=int, default=400, help="Max number of tokens to retain in each entry (min: 10)")
     #& may replace with Config.checkpoints.override_boilerplate later, but using it for now while debugging
     parser.add_argument("--init_domain_filter", action="store_true", help = "Whether to initialize the domain filter with results from previous runs.")
     parser.add_argument("--filter_config", type=str, default=DEFAULT_YAML_PATH, help="Path to YAML file specifying pattern filter order (as read from `patterns_registry.py`)")
@@ -168,8 +194,9 @@ def get_cfg_from_cli():
         keyword_top_k=args.top_k,
         deduplicate=args.deduplicate,
         scraper_type=args.scraper_type,
-        # use_java_scraper=args.use_java_scraper,
+        keyword_model=args.keyword_model,
         chunk_size=args.chunk_size,
+        max_tokens=args.max_tokens,
         init_domain_filter=args.init_domain_filter,
         filter_config_path=args.filter_config,
         seed_kws=args.seed_kws,

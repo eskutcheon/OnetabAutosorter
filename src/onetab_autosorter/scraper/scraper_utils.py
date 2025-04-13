@@ -31,7 +31,7 @@ def strip_soup(soup: BeautifulSoup) -> BeautifulSoup:
 
 
 #& may keep this here or move it to the general TextCleaningFilter class later
-def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 500) -> str:
+def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 1000) -> str:
     """ Extract raw visible text from the full HTML page, ignoring scripts/styles """
     # use islice over the iterator of significant strings to limit the number of tokens returned
     text = list(islice(soup.stripped_strings, 0, max_tokens))

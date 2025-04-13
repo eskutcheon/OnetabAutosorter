@@ -131,6 +131,7 @@ class NetscapeBookmarkParser(BaseParser):
         self.bookmarks.clear()
         self.group_ids.clear()
 
+    # TODO: make this a class method and add it to the base class while resolving differences with the OneTabParser
     @staticmethod
     def _parse_timestamp(timestamp_str: str) -> Optional[str]:
         """ parse a POSIX timestamp string into a formatted datetime string

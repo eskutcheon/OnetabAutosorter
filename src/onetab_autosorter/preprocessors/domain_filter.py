@@ -54,7 +54,7 @@ class DomainFilterData:
 
 class DomainBoilerplateFilter:
     """ Domain-wide TF-IDF based boilerplate detection and filtering. """
-    def __init__(self, min_domain_samples=5, min_df_ratio=0.8, ngram_range=(2, 10), max_features=500):
+    def __init__(self, min_domain_samples=5, min_df_ratio=0.8, ngram_range=(2, 10), max_features=1000):
         self.min_domain_samples = min_domain_samples
         self.min_df_ratio = min_df_ratio
         self.ngram_range = ngram_range
@@ -73,11 +73,17 @@ class DomainBoilerplateFilter:
             # fill only as many domain entries as needed (FILTER_THRESHOLD)
             sampling_size = min(domain_counts[domain], self.min_domain_samples)
             # fetch a only as many pages as needed
-            domain_entries = domain_map[domain][:sampling_size]
-            urls = [e["url"] for e in domain_entries]
+            domain_entries: List[Dict[str, Any]] = domain_map[domain][:sampling_size]
+            #? TEMPORARY - might make it conditional until it gets a better rewrite
+            #! previous implementation using html_fetcher_fn as function argument - now assuming bulk webscraping comes first
             # fetch HTML information from HTTP requests in a batch
-            #? NOTE: if I want this method to be integrated into `DomainBoilerplateFilter`, I should pass this function and the urls
-            text_map = html_fetcher_fn(urls) if html_fetcher_fn else {url: "" for url in urls}
+            #text_map = html_fetcher_fn(urls) if html_fetcher_fn else {url: "" for url in urls}
+            try:
+                text_map = {e["url"]: e["scraped"] for e in domain_entries}
+            except KeyError: # keeping this here just for backward compatibility with the old format for now
+                print(termcolor.colored(f"WARNING: domain {domain} has no scraped data!", color="yellow"))
+                urls = [e["url"] for e in domain_entries]
+                text_map = html_fetcher_fn(urls) if html_fetcher_fn else {url: "" for url in urls}
             for url, raw_text in text_map.items():
                 #? NOTE: an internal trigger to add_entry_text finalizes phrases after enough are encountered
                 self.add_entry_text(domain, raw_text)

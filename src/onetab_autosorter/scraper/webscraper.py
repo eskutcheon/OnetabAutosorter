@@ -55,7 +55,7 @@ class WebScraper:
                     result.append(q.popleft())
         return result
 
-
+    #& UNUSED - saves HTML
     def fetch_batch(self, urls: List[str]) -> Dict[str, str]:
         """ Multi-threaded batch fetcher with optional domain interleaving and rate limiting. """
         from concurrent.futures import ThreadPoolExecutor, as_completed

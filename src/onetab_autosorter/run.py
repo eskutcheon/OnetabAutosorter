@@ -1,50 +1,27 @@
 import os
 import json
-import time
 from collections import defaultdict #, Counter
 from typing import Optional, Dict, List, Literal, Callable, Union, Any
 import polars as pl
 # local imports
 from onetab_autosorter.keyword_extraction import KeyBertKeywordModel
-from onetab_autosorter.config.config import Config, get_cfg_from_cli
+from onetab_autosorter.config.config import Config
 from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
 from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
 from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
-from onetab_autosorter.utils.io_utils import PythonSetEncoder, compute_hash, cache_path
-from onetab_autosorter.pipelines.staging_utils import load_entries, get_fetcher_function, create_and_run_domain_filter
+from onetab_autosorter.utils.io_utils import PythonSetEncoder, compute_hash
+from onetab_autosorter.pipelines.staging_utils import load_entries, create_fetcher, create_and_fit_domain_filter
 
 
-
-
-#################################################################################################
-# (NEW) Keyword Extraction + Domain Boilerplate Filtering Pipeline
-#################################################################################################
-
-
-def get_entries_with_keywords(entries: List[Dict[str, Any]], keyword_model, config: Config) -> List[Dict[str, Any]]:
-    final_hash = compute_hash(config.input_file + config.model_name)
-    final_path = cache_path(config.checkpoints.cache_dir, f"final_{final_hash}")
-    if config.checkpoints.reuse_final_output and os.path.exists(final_path):
-        with open(final_path, "r", encoding="utf-8") as f:
-            final_results = json.load(f)
-    else:
-        final_results = keyword_model.run(entries)
-        if config.checkpoints.save_final_output:
-            with open(final_path, "w", encoding="utf-8") as f:
-                json.dump(final_results, f, indent=2, cls=PythonSetEncoder)
 
 
 
 # should be temporary with the new pipeline structure but I need to do regression testing on the keyword models:
 def scrape_then_clean(entries: List[Dict[str, Any]], preprocessor: TextPreprocessingHandler, fetcher_fn: Callable) -> List[Dict[str, Any]]:
-    # if self.is_connected and self.fetcher_fn:
-    #     urls = [e["url"] for e in entries]
-    #     # fetch text for each URL (e.g. domain-filtered or raw HTML)
-    #     summaries_map = self.fetcher_fn(urls)
     urls = [e["url"] for e in entries]
-    # TODO: need to generalize this to ensure it always returns the same structure
+    # TODO: need to generalize the fetcher_fn across all options to ensure it always returns the same structure
     summaries_map = fetcher_fn(urls)
-    # TODO: add batched support for preprocessor
+    # TODO: add multi-threaded batched support for preprocessor (only the non-domain-filtering part)
     for idx in range(len(entries)):
         url = entries[idx]["url"]
         domain = entries[idx]["domain"]
@@ -52,32 +29,7 @@ def scrape_then_clean(entries: List[Dict[str, Any]], preprocessor: TextPreproces
         raw_text = summaries_map.get(url, "")
         # If domain is locked or partially locked, do the filtering - filter_boilerplate() will be a no-op if domain isn't locked yet
         full_text = preprocessor.process_text(raw_text, domain, use_domain_filter=True)
-        entries[idx]["scraped_text"] = full_text # or maybe call it "filtered_text"
-    return entries
-
-
-#! TEMPORARY - testing batching
-def scrape_then_clean2(entries: List[Dict[str, Any]], preprocessor: TextPreprocessingHandler, fetcher_fn: Callable) -> List[Dict[str, Any]]:
-    batch_size = 10
-    content_field = "scraped_text"
-    urls = [e["url"] for e in entries]
-    summaries_map = fetcher_fn(urls)
-    # Process in batches
-    for i in range(0, len(entries), batch_size):
-        batch = entries[i:i+batch_size]
-        urls = [entry["url"] for entry in batch]
-        # Fetch content for batch
-        content_map = fetcher_fn(urls)
-        # Process content and update entries
-        for entry in batch:
-            url = entry["url"]
-            domain = entry.get("domain", "")
-            content = content_map.get(url, "")
-            if content:
-                processed = preprocessor.process_text(content, domain)
-                entry[content_field] = processed
-            else:
-                entry[content_field] = ""
+        entries[idx]["clean_text"] = full_text # or maybe call it "filtered_text"
     return entries
 
 
@@ -96,38 +48,33 @@ def run_pipeline_with_keybert(config: Config):
     MIN_DOMAIN_COUNT = 2
     filter_json_path = os.path.join("output", "domain_boilerplate.json")
     entries = load_entries(config.input_file, config)
+    scraper_fn: Callable = create_fetcher(config.scraper_type)
     # select entries by domain then sort by frequency so the most frequent domains get processed first
     domain_map: Dict[str, List[Dict]] = defaultdict(list)
     for e in entries:
         # populate dictionary of lists with domain names as keys and entries as values
         domain_map[e["domain"]].append(e)
     # instantiate domain filter object and run the filter (we set the filter first because the keyword extractor expects locked domain keys)
-    domain_filter_obj = create_and_run_domain_filter(
+    domain_filter_obj = create_and_fit_domain_filter(
         config.init_domain_filter,
         domain_map,
-        filter_json_path,
+        json_path=filter_json_path,
         min_domain_samples=FILTER_THRESHOLD,
+        scraper_fn=scraper_fn,
         #min_repeat_count=MIN_DOMAIN_COUNT,
         ngram_range = (2, 10) # determines the n-gram range for boilerplate detection, e.g. (2,5) means phrases with 2-5 words are considered
     )
     del domain_map # free memory - variables not needed anymore
     text_cleaner = TextCleaningFilter(ignore_patterns=config.compiled_filters)
     preprocessor = TextPreprocessingHandler(domain_filter_obj, text_cleaner)
-    #! DEBUGGING - timing the difference in batched implementation to see how worth it this even is
-    start_time = time.time()
-    entries = scrape_then_clean2(entries, preprocessor, get_fetcher_function(config.scraper_type))
-    # TODO: if refactoring the handler out of the keyword models, we may still consider adding the fetcher_fn 
-        # to the handler to allow for efficient chunking (fetch -> filter -> extract) in the future
+    entries = scrape_then_clean(entries, preprocessor, scraper_fn)
     # Prepare KeyBERT
     keyword_model = KeyBertKeywordModel(
         model_name=config.model_name,
         candidate_labels=config.seed_kws if config.seed_kws else None,
         top_k=config.keyword_top_k,
-        #preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
-        #fetcher_fn = get_fetcher_function("naive")
     )
     final_results = keyword_model.run(entries) #[]
-    print("FINAL TIME: ", time.time() - start_time)
     # TODO: add early parsing to drop empty entries
     # TODO: need to add error catching for empty keywords
     #embedding_test(final_results, config)
@@ -137,23 +84,25 @@ def run_pipeline_with_keybert(config: Config):
 
 
 ##############################################################################################################
-# TESTING BERTTopic model in new pipeline - still need to consolidate them and handle the chunking logic later
+# TESTING BERTopic model in new pipeline - still need to consolidate them and handle the chunking logic later
 ##############################################################################################################
 
 def run_pipeline_with_bertopic(config: Config):
-    from onetab_autosorter.keyword_extraction import BERTTopicKeywordModel
+    from onetab_autosorter.keyword_extraction import BERTopicKeywordModel
     FILTER_THRESHOLD = 5
     filter_json_path = os.path.join("output", "domain_boilerplate.json")
     # Load entries, maybe do domain filtering, etc.
     entries = load_entries(config.input_file, config)
+    scraper_fn: Callable = create_fetcher(config.scraper_type)
     # select entries by domain then sort by frequency so the most frequent domains get processed first
     domain_map: Dict[str, List[Dict]] = defaultdict(list)
     for e in entries:
         domain_map[e["domain"]].append(e)
-    domain_filter: DomainBoilerplateFilter = create_and_run_domain_filter(
+    domain_filter: DomainBoilerplateFilter = create_and_fit_domain_filter(
         config.init_domain_filter,
         domain_map,
-        filter_json_path,
+        json_path=filter_json_path,
+        scraper_fn=scraper_fn,
         min_domain_samples=FILTER_THRESHOLD,
         #min_repeat_count=MIN_DOMAIN_COUNT,
         ngram_range = (2, 10) # determines the n-gram range for boilerplate detection, e.g. (2,5) means phrases with 2-5 words are considered
@@ -161,16 +110,16 @@ def run_pipeline_with_bertopic(config: Config):
     del domain_map # free memory - variables not needed anymore
     text_cleaner = TextCleaningFilter(ignore_patterns=config.compiled_filters)
     preprocessor = TextPreprocessingHandler(domain_filter, text_cleaner)
-    entries = scrape_then_clean(entries, preprocessor, get_fetcher_function(config.scraper_type))
-    # Create BERTTopic model with domain filtering + text truncation
-    topic_model = BERTTopicKeywordModel(
+    entries = scrape_then_clean(entries, preprocessor, fetcher_fn=scraper_fn)
+    # Create BERTopic model with domain filtering + text truncation
+    topic_model = BERTopicKeywordModel(
         model_name=config.model_name,
         candidate_labels=config.seed_kws if config.seed_kws else None,
         nr_topics=None,       # or 'auto', or an integer
         # preprocessor=preprocessor,  # use the TextPreprocessingHandler for cleaning
         # fetcher_fn=None       # or default_html_fetcher_batch
     )
-    # Run BERTTopic on the entire set of entries
+    # Run BERTopic on the entire set of entries
     updated_entries = topic_model.run(entries)
     if not updated_entries:
         raise RuntimeError("ERROR: updated entries returned empty")
@@ -186,12 +135,6 @@ def run_pipeline_with_bertopic(config: Config):
 ##############################################################################################################
 # will only be relevant using the tabular dataframe with output keywords for clustering later
 # def _simulate_data_as_text(entry: Dict[str, Any]) -> str:
-#     """ embed domain and group info into the text """
-#     # TODO: move upstream since it's more key-dependent than I'd prefer
-#     domain_label = entry["domain"].split(".")[-2]  # "wikipedia" or "linuxfoundation"
-#     group_label = f"group_{entry['group_ids'][0]}" if entry["group_ids"] else ""
-#     artificial_text = f"domain_{domain_label} - {group_label}"
-#     return artificial_text.strip()  # return the simulated text for the entry, if no real text is available
 
 
 
@@ -230,9 +173,3 @@ def embedding_test(entries: List[Dict[str, Any]], config: Config):
     df_labeled.write_csv(config.output_json.replace(".json", "_clusters.csv"))
 
 
-
-# if __name__ == "__main__":
-#     config = get_cfg_from_cli()
-#     # defaults to False
-#     scraper_type = config.scraper_type.lower()
-#     run_pipeline(config, scraper_type)

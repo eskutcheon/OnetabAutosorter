@@ -10,9 +10,6 @@ from .text_filters import TextCleaningFilter
 
 
 
-# TODO: might still wrap stuff in a WebScraper class and pass it here for unified preprocessing directly from the HTML from BeautifulSoup
-    # - would allow for easier management of all the actual scraping logic like adding rate-limiting, 
-    # might end up removing the check for whether the user has an internet connection unless I find a much easier way
 
 class TextPreprocessingHandler:
     """ Aggregates multiple text preprocessing steps into a single pipeline manager:
@@ -84,30 +81,27 @@ class TextPreprocessingHandler:
         return text  # we don't do removal yet if not locked
 
 
-    #& might pass of this task to the HTML2TextFilter class later, assuming this class has an instance as a member variable
+    ####! REPLACE THIS WITH FUNCTION USING ISLICE
     def _extract_from_soup(self, soup: BeautifulSoup) -> str:
-        """ Clean raw HTML data and get text while optionally truncating to self.max_tokens """
-        remove_tags = ["script", "style", "noscript"]
-        for tagname in remove_tags:
-            for t in soup.find_all(tagname):
-                t.decompose()
-        # If you want to remove certain CSS selectors:
-        # for sel in [".footnote", "header nav", "aside"]:
-        #     for t in soup.select(sel):
+        raise NotImplementedError("SEE COMMENT ABOVE")
+        # """ Clean raw HTML data and get text while optionally truncating to self.max_tokens """
+        # remove_tags = ["script", "style", "noscript"]
+        # for tagname in remove_tags:
+        #     for t in soup.find_all(tagname):
         #         t.decompose()
-        # now get text
-        text = soup.get_text(separator="\n", strip=True)
-        tokens = text.split()
-        if len(tokens) > self.max_tokens:
-            tokens = tokens[: self.max_tokens]
-        return " ".join(tokens)
+        # #? to remove certain CSS selectors:
+        # # for sel in [".footnote", "header nav", "aside"]:
+        # #     for t in soup.select(sel):
+        # #         t.decompose()
+        # # now get text
+        # text = soup.get_text(separator="\n", strip=True)
+        # tokens = text.split()
+        # if len(tokens) > self.max_tokens:
+        #     tokens = tokens[: self.max_tokens]
+        # return " ".join(tokens)
 
-    # # !!! Seemingly not used - need to do a check on the domain filter's data dictionary and call it if needed
-    # def finalize_domain_filter(self):
-    #     """ forcibly finalize domain filter if needed. """
-    #     if self.domain_filter:
-    #         self.domain_filter.force_finalize_all()
 
+    #& currently unused - determine whether to keep later
     def process_batch_html(self, html_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
         """ Process multiple HTML documents in batch.
             Args:
@@ -123,6 +117,7 @@ class TextPreprocessingHandler:
             results[url] = processed
         return results
 
+    #& currently unused - determine whether to keep later
     def process_batch_text(self, text_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
         """ Process multiple text documents in batch.
             Args:
@@ -138,7 +133,9 @@ class TextPreprocessingHandler:
             results[url] = processed
         return results
 
-    def process_entries(self, entries: List[Dict[str, Any]], content_map: Dict[str, str]) -> List[Dict[str, Any]]:
+    #& currently unused - determine whether to keep later
+    # def process_entries(self, entries: List[Dict[str, Any]], content_map: Dict[str, str]) -> List[Dict[str, Any]]:
+    def process_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ Process a list of entries with their content.
             Args:
                 entries: List of entry dictionaries
@@ -146,10 +143,12 @@ class TextPreprocessingHandler:
             Returns:
                 The updated list of entries with processed content
         """
-        for entry in tqdm(entries, desc="Processing entries"):
-            url = entry["url"]
+        for idx, entry in enumerate(tqdm(entries, desc="Processing entries")):
+            #url = entry["url"]
             domain = entry.get("domain", "")
-            content = content_map.get(url, "")
+            #content = content_map.get(url, "")
+            #content = entry.get("scraped", None)
+            content = entry.pop("scraped", None)
             if content:
                 # Determine if content is HTML or plain text
                 is_html = bool(content.strip().startswith(("<html", "<!DOCTYPE", "<doc")))
@@ -157,7 +156,7 @@ class TextPreprocessingHandler:
                     processed = self.process_html(content, domain)
                 else:
                     processed = self.process_text(content, domain)
-                entry["processed_text"] = processed
+                entries[idx]["clean_text"] = processed
             else:
-                entry["processed_text"] = ""
+                entries[idx]["clean_text"] = ""
         return entries

@@ -23,13 +23,13 @@ class TextCleaningFilter:
         self,
         min_word_count: int = 3,  # minimum number of words in a line to keep it (for spammy line removal)
         ignore_patterns: List[Union[str, re.Pattern]] = None,
-        lang_filter = "en"
+        #lang_filter = "en" #! FIXME: not in use right now but needs to be incorporated for language detection and stopword filtering
     ):
         # Make sure resources are available
         nltk.download('punkt', quiet=True)
         nltk.download('stopwords', quiet=True)
         self.min_word_count = min_word_count
-        self.lang_filter = lang_filter
+        #self.lang_filter = lang_filter
         # TODO: reference a language mapping to be consistent with `lang_filter`
         self.stopwords: Set[str] = set(stopwords.words("english"))
         self.ignore_patterns: List[re.Pattern] = []
