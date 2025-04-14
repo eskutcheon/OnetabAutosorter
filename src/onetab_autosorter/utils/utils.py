@@ -42,11 +42,11 @@ def get_keywords_from_paths(folder_list: List[str], max_depth: int = 4) -> Set[s
     """
     # generate the regex pattern for all permutations of ignored words
     ignored_regex = generate_ignored_regex(DEFAULT_IGNORE_FOLDER_NAMES)
-    print("ignored regex pattern: ", ignored_regex)
-    print("number of ignored regex patterns: ", len(ignored_regex.split("|")))
+    #print("ignored regex pattern: ", ignored_regex)
+    #print("number of ignored regex patterns: ", len(ignored_regex.split("|")))
     # helper function to extract the final folder name and filter out ignored words
     def filter_name(folder_name: str) -> str:
-        print("initial folder path: ", folder_name)
+        #print("initial folder path: ", folder_name)
         subfolders = folder_name.split("/")[:max_depth]
         filtered = subfolders[-1].strip().lower()
         # use regex to remove ignored words and their combinations
