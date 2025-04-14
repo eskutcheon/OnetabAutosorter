@@ -7,6 +7,7 @@ from typing import List, Dict, Any, Optional
 # Suppose we import or define these somewhere:
 from .domain_filter import DomainBoilerplateFilter
 from .text_filters import TextCleaningFilter
+from onetab_autosorter.scraper.scraper_utils import fetch_full_text
 
 
 
@@ -23,7 +24,7 @@ class TextPreprocessingHandler:
         self,
         domain_filter: DomainBoilerplateFilter = None,
         cleaning_filter: TextCleaningFilter = None,
-        max_tokens=200,
+        max_tokens=400,
     ):
         """
             :param domain_filter: an instance of DomainBoilerplateFilter (optional).
@@ -57,7 +58,6 @@ class TextPreprocessingHandler:
     ) -> str:
         """ Overload for the case where we already have plain text (no HTML) """
         # advanced filtering
-        # TODO: might want to move the maximum number of tokens to the cleaning filter itself
         if self.cleaning_filter:
             text = self.cleaning_filter.filter(text, self.max_tokens)
         # domain-based
@@ -81,24 +81,10 @@ class TextPreprocessingHandler:
         return text  # we don't do removal yet if not locked
 
 
-    ####! REPLACE THIS WITH FUNCTION USING ISLICE
     def _extract_from_soup(self, soup: BeautifulSoup) -> str:
-        raise NotImplementedError("SEE COMMENT ABOVE")
-        # """ Clean raw HTML data and get text while optionally truncating to self.max_tokens """
-        # remove_tags = ["script", "style", "noscript"]
-        # for tagname in remove_tags:
-        #     for t in soup.find_all(tagname):
-        #         t.decompose()
-        # #? to remove certain CSS selectors:
-        # # for sel in [".footnote", "header nav", "aside"]:
-        # #     for t in soup.select(sel):
-        # #         t.decompose()
-        # # now get text
-        # text = soup.get_text(separator="\n", strip=True)
-        # tokens = text.split()
-        # if len(tokens) > self.max_tokens:
-        #     tokens = tokens[: self.max_tokens]
-        # return " ".join(tokens)
+        """ Clean raw HTML data and get text while optionally truncating to self.max_tokens """
+        fetch_full_text(soup, self.max_tokens)
+
 
 
     #& currently unused - determine whether to keep later
@@ -133,7 +119,7 @@ class TextPreprocessingHandler:
             results[url] = processed
         return results
 
-    #& currently unused - determine whether to keep later
+
     # def process_entries(self, entries: List[Dict[str, Any]], content_map: Dict[str, str]) -> List[Dict[str, Any]]:
     def process_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ Process a list of entries with their content.

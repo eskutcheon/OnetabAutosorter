@@ -215,6 +215,7 @@ def create_fetcher(scraper_type: Union[Callable, Literal["none", "java", "naive"
         scrape_func = "run_async_fetch_batch" if scraper_type == "async" else "fetch_batch"
         return getattr(scraper, scrape_func)
     elif scraper_type == "java":
+        raise NotImplementedError("Java microservice scraper needs to be refactored for use in the pipeline.")
         from onetab_autosorter.scraper.client import ScraperServiceManager, fetch_summary_batch
         scraper = ScraperServiceManager()
         return scraper.fetch_within_context(fetch_summary_batch)

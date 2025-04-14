@@ -2,63 +2,91 @@ import os, sys
 import argparse
 import yaml
 from dataclasses import dataclass, field
-from typing import Optional, List
+from typing import Optional, List, Dict
 from pprint import pprint
 
 
 DEFAULT_YAML_PATH = os.path.join(os.path.abspath(os.path.dirname(__file__)), r"default_filter_order.yaml")
 SCRAPER_OPTIONS = ["none", "limited", "java", "naive", "async"]
 KEYWORD_MODEL_REGISTRY = ["keybert", "bertopic"]
+DEFAULT_STAGES = ["parsed", "scraped", "domain_filter", "cleaned", "keywords", "embeddings", "clustered", "final_output"]
+
+
+@dataclass
+class StageCacheSettings:
+    stage_name: str
+    load_cache: bool = False
+    save_cache: bool = False
+    cache_dir: str = "cache"
+
 
 @dataclass
 class CheckpointSettings:
+    stage_settings: Dict[str, StageCacheSettings] = field(default_factory=dict)
     # TODO: make a namedtuple or something for each pair of reuse/save settings along with default directory paths
-    reuse_parsed: bool = False
-    reuse_scraped: bool = False
-    reuse_cleaned: bool = False
-    reuse_final_output: bool = False
+    # reuse_parsed: bool = False
+    # reuse_scraped: bool = False
+    # reuse_cleaned: bool = False
+    # reuse_final_output: bool = False
     #! skipping adding the next couple attributes to the parser arguments for now
-    reuse_keywords: bool = False
-    save_keywords: bool = True
+    # reuse_keywords: bool = False
+    # save_keywords: bool = True
     #reuse_embeddings: bool = False
-    override_boilerplate: bool = False
-    save_parsed: bool = False
-    save_scraped: bool = False
-    save_cleaned: bool = False
-    save_final_output: bool = True
+    #override_boilerplate: bool = False
+    # save_parsed: bool = False
+    # save_scraped: bool = False
+    # save_cleaned: bool = False
+    # save_final_output: bool = True
     cache_dir: str = "cache"
 
     def __post_init__(self):
-        # TODO: eventually replace this with setting the (relative) root directory with cache_dir
-        self.default_paths = DefaultPaths()
         # ensure the cache directory exists
         if not os.path.exists(self.cache_dir):
             os.makedirs(self.cache_dir)
+        # Initialize default stages if not provided
+        if not self.stage_settings:
+            self._init_default_stages()
+
+    def _init_default_stages(self):
+        """ Initialize default settings for all pipeline stages """
+        default_stages = [
+            ("parsed", False, False),
+            ("scraped", False, True), # TODO: need to looked for cached scraped text and reference it by default
+            ("domain_filter", True, True),
+            ("cleaned", False, False),
+            ("keywords", False, True),
+            ("embeddings", False, False),
+            ("clustered", False, False),
+            ("final_output", False, True),
+        ]
+        for name, reuse, save in default_stages:
+            self.set_stage(name, reuse, save)
+
+    def set_stage(self, name: str, reuse: bool = False, save: bool = False):
+        """Add a new stage or update an existing one."""
+        self.stage_settings[name] = StageCacheSettings(
+            stage_name=name,
+            load_cache=reuse,
+            save_cache=save,
+            cache_dir=os.path.join(self.cache_dir, name)
+        )
+
 
 
 #! [CHANGE LATER] making this frozen for now, so users won't be able to modify the default paths
-@dataclass(frozen=True)
-class DefaultPaths:
-    #! UNUSED FOR NOW - still need to work out how to use these while allowing for dynamic filenames
-    # TODO: want to keep these default directories but make the filenames more dynamic
-    parsed: str = os.path.join("output", "parsed_html", "parsed_entries.json")
-    # let's assume the scraped and cleaned data go to the same directory but with different prefixes
-    scraped: str = os.path.join("output", "scraped_data", "scraped_entries.json")
-    cleaned: str = os.path.join("output", "scraped_data", "cleaned_entries.json")
-    domain_boilerplate: str = os.path.join("output", "domain_boilerplate.json")
-    keyword_data: str = os.path.join("output", "with_keywords", "keyword_data.json")
-    embeddings: str = os.path.join("output", "embeddings", "embeddings.json")
-    clustered: str = os.path.join("output", "sorted", "sorted_entries.json")
+# @dataclass(frozen=True)
+# class DefaultPaths:
+#     #! UNUSED FOR NOW - still need to work out how to use these while allowing for dynamic filenames
+#     # TODO: want to keep these default directories but make the filenames more dynamic
+#     parsed: str = os.path.join("output", "parsed_html", "parsed_entries.json")
+#     # let's assume the scraped and cleaned data go to the same directory but with different prefixes
+#     scraped: str = os.path.join("output", "scraped_data", "scraped_entries.json")
+#     cleaned: str = os.path.join("output", "scraped_data", "cleaned_entries.json")
+#     domain_filter: str = os.path.join("output", "domain_filter.json")
+#     keyword_data: str = os.path.join("output", "with_keywords", "keyword_data.json")
+#     embeddings: str = os.path.join("output", "embeddings", "embeddings.json")
+#     clustered: str = os.path.join("output", "sorted", "sorted_entries.json")
 
-
-
-
-@dataclass
-class FilterSettings:
-    #! UNUSED FOR NOW - just considering adding it here for future-proofing as complexity of filtering grows
-    init_domain_filter: bool = False
-    filter_config_path: str = DEFAULT_YAML_PATH
-    compiled_filters: list = None
 
 
 @dataclass
@@ -151,18 +179,22 @@ def get_cfg_from_cli():
     parser.add_argument("--opts", type=str, help="Optional YAML file to override CLI args")
     # Group for checkpoint-related flags
     ckpt = parser.add_argument_group("Checkpointing + Caching")
+    for stage in DEFAULT_STAGES:
+        stage_group = parser.add_argument_group(f"{stage.capitalize()} Stage")
+        stage_group.add_argument(f"--reuse_{stage}", action="store_true", help=f"Reuse existing {stage} data")
+        stage_group.add_argument(f"--save_{stage}", action="store_true", help=f"Save {stage} data")
     # settings for reusing cached files
     # TODO: still want to name these like ckpt so might end up taking the enclosing dataclass based approach like in my thesis
-    ckpt.add_argument("--reuse_parsed", action="store_true")
-    ckpt.add_argument("--reuse_scraped", action="store_true")
-    ckpt.add_argument("--reuse_cleaned", action="store_true")
-    ckpt.add_argument("--reuse_final_output", action="store_true")
-    ckpt.add_argument("--override_boilerplate", action="store_true")
+    # ckpt.add_argument("--reuse_parsed", action="store_true")
+    # ckpt.add_argument("--reuse_scraped", action="store_true")
+    # ckpt.add_argument("--reuse_cleaned", action="store_true")
+    # ckpt.add_argument("--reuse_final_output", action="store_true")
+    # ckpt.add_argument("--override_boilerplate", action="store_true")
     # for saving the intermediate files
-    ckpt.add_argument("--save_parsed", action="store_true")
-    ckpt.add_argument("--save_scraped", action="store_true")
-    ckpt.add_argument("--save_cleaned", action="store_true")
-    ckpt.add_argument("--save_final_output", action="store_true")
+    # ckpt.add_argument("--save_parsed", action="store_true")
+    # ckpt.add_argument("--save_scraped", action="store_true")
+    # ckpt.add_argument("--save_cleaned", action="store_true")
+    # ckpt.add_argument("--save_final_output", action="store_true")
     ckpt.add_argument("--cache_dir", default="cache")
     # run the parser and return the config object
     args: argparse.Namespace = parser.parse_args()
@@ -176,17 +208,23 @@ def get_cfg_from_cli():
             setattr(args, key, value)
     # Construct CheckpointSettings
     ckpt_cfg = CheckpointSettings(
-        reuse_parsed=args.reuse_parsed,
-        reuse_scraped=args.reuse_scraped,
-        reuse_cleaned=args.reuse_cleaned,
-        reuse_final_output=args.reuse_final_output,
-        override_boilerplate=args.override_boilerplate,
-        save_parsed=args.save_parsed,
-        save_scraped=args.save_scraped,
-        save_cleaned=args.save_cleaned,
-        save_final_output=args.save_final_output,
+        # reuse_parsed=args.reuse_parsed,
+        # reuse_scraped=args.reuse_scraped,
+        # reuse_cleaned=args.reuse_cleaned,
+        # reuse_final_output=args.reuse_final_output,
+        #override_boilerplate=args.override_boilerplate,
+        # save_parsed=args.save_parsed,
+        # save_scraped=args.save_scraped,
+        # save_cleaned=args.save_cleaned,
+        # save_final_output=args.save_final_output,
         cache_dir=args.cache_dir,
     )
+    for stage in DEFAULT_STAGES:
+        reuse_attr = f"reuse_{stage}"
+        save_attr = f"save_{stage}"
+        reuse = getattr(args, reuse_attr, False)
+        save = getattr(args, save_attr, False)
+        ckpt_cfg.set_stage(stage, reuse=reuse, save=save)
     return Config(
         input_file=args.input_file,
         output_json=args.output,

@@ -10,9 +10,6 @@ from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilte
 from onetab_autosorter.utils.io_utils import compute_hash, get_hashed_path_from_string, save_json, load_json, get_hashed_path_from_hash
 
 
-#? NOTE: a lot of the skeleton for this file was written by Copilot - still need to de-shittify some parts
-
-
 @dataclass
 class SaveDataCallback:
     """ Callback for saving data at different stages of the pipeline """
@@ -141,8 +138,6 @@ class Pipeline:
                 #todo: should be a lot easier with overridden run functions in the subclasses
             data, next_args = stage.run(data, *args, **kwargs)  # run the stage with the data and any additional arguments
             feedforward_args.append(next_args)  # collect additional arguments for the next stage (empty by default)
-            # if self.cache_hash is None:
-            #     self.set_cache_hash(data)
             # save the data by calling a dispatcher function that calls the appropriate saving function based on the data type
                 # it should take a variable number of positional arguments for potentially multiple data
             ###some_central_saving_function(data, output_path=stage.save_ckpt_path)  # replace with actual saving logic
@@ -165,19 +160,20 @@ create:
 class ParsingStage(PipelineStage):
     def __init__(self, file_path: str, deduplicate: bool, checkpoints: CheckpointSettings):
         from onetab_autosorter.pipelines.staging_utils import run_parser, create_parser
+        stage_settings = checkpoints.stage_settings["parsed"]
         super().__init__(
             name="parsed",
             # TODO: I should rewrite some parsing logic so that I'm not passing the file path twice
             run_fn=lambda _: run_parser(create_parser(file_path), file_path, deduplicate),
-            cache_dir=checkpoints.cache_dir,
-            reuse_cache=checkpoints.reuse_parsed,
-            save_cache=checkpoints.save_parsed
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache
         )
 
 class WebScrapingStage(PipelineStage):
     def __init__(self, scraper_type: str, checkpoints: CheckpointSettings):
         from onetab_autosorter.pipelines.staging_utils import run_webscraping, create_fetcher, merge_entries_with_scraped
-        #!!! What I'm doing right now is fucking stupid tbh
+        stage_settings = checkpoints.stage_settings["scraped"]
         def _run_webscraping(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             fetcher_fn = create_fetcher(scraper_type)
             self._set_propagation(fetcher_fn=fetcher_fn)
@@ -190,9 +186,9 @@ class WebScrapingStage(PipelineStage):
         super().__init__(
             name="scraped",
             run_fn = _run_webscraping, # TODO: think I'm just going to rewrite the base class `run` and stop passing run_fn and just call an overridden `self.run`
-            cache_dir=checkpoints.cache_dir,
-            reuse_cache=checkpoints.reuse_scraped,
-            save_cache=checkpoints.save_scraped
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache
         )
 
 
@@ -202,14 +198,16 @@ class DomainFilterFittingStage(PipelineStage):
     #? NOTE: DomainBoilerplateFilter takes a lot of additional arguments that should be accounted for
     def __init__(self, checkpoints: CheckpointSettings, **kwargs):
         from onetab_autosorter.pipelines.staging_utils import create_and_fit_domain_filter, get_domain_mapped_urls
-        # TODO: may want to include a mechanism for propagating stuff (in this case, the domain filter to the handler) to the next stage
-                # passing a local function to the run function just like the lambdas, but this should be more readable
+        # passing a local function to the run function just like the lambdas, but this should be more readable
+        stage_settings = checkpoints.stage_settings["domain_filter"]
         def _run_domain_filter_fitting(data: List[Dict[str, Any]], fetcher_fn: Callable = None) -> List[Dict[str, Any]]:
             #if not fetcher_fn:
             domain_filter = create_and_fit_domain_filter(
-                load_from_file = not checkpoints.override_boilerplate,
+                #! FIXME: need to remove the saving in create_and_fit_domain_filter while allowing loading the object
+                load_from_file = stage_settings.load_cache,
+                #load_from_file = not checkpoints.override_boilerplate,
                 domain_map = get_domain_mapped_urls(data),
-                #! TEMPORARY - adding to config later
+                #! TEMPORARY - add to config later
                 json_path = r"output/domain_boilerplate.json",
                 # TODO: after a rewrite of the domain filtering approach, fetcher_fn may not be necessary - might just make two different entry points though
                 scraper_fn = fetcher_fn if fetcher_fn else None, # just to replace the empty argument for the lambda
@@ -221,9 +219,12 @@ class DomainFilterFittingStage(PipelineStage):
         super().__init__(
             name="domain_filter_fitting",
             run_fn = _run_domain_filter_fitting,
-            cache_dir=checkpoints.cache_dir,
-            reuse_cache = not checkpoints.override_boilerplate,
-            save_cache=True
+            # cache_dir=checkpoints.cache_dir,
+            # reuse_cache = not checkpoints.override_boilerplate,
+            # save_cache=True
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=False, #stage_settings.load_cache,
+            save_cache=False #stage_settings.save_cache
         )
 
 
@@ -232,6 +233,7 @@ class TextPreprocessingStage(PipelineStage):
     def __init__(self, compiled_filters: List[Pattern], checkpoints: CheckpointSettings, max_tokens: int = 200):
         from onetab_autosorter.pipelines.staging_utils import  create_preprocessor, create_text_cleaning_filter
         # instantiate the stage with the run function that will be called later
+        stage_settings = checkpoints.stage_settings["cleaned"]
         def _run_handler(data: List[Dict[str, Any]], domain_filter: DomainBoilerplateFilter) -> TextPreprocessingHandler:
             cleaning_filter = create_text_cleaning_filter(ignore_patterns=compiled_filters)
             preprocessor = create_preprocessor(domain_filter, cleaning_filter, max_tokens=max_tokens)
@@ -240,10 +242,9 @@ class TextPreprocessingStage(PipelineStage):
         super().__init__(
             name="text_cleaning_filter",
             run_fn = _run_handler,
-            cache_dir=checkpoints.cache_dir,
-            reuse_cache=checkpoints.reuse_cleaned,
-            # TODO: might make this the save callback function later - override with whatever while keeping the default caching
-            save_cache=checkpoints.save_cleaned
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache
         )
 
 
@@ -259,6 +260,7 @@ class KeywordExtractionStage(PipelineStage):
         #? NOTE: almost certainly need more arguments to instantiate the keyword models for more robust extraction
     ):
         from onetab_autosorter.pipelines.staging_utils import create_keyword_model
+        stage_settings = checkpoints.stage_settings["keywords"]
         # instantiate the stage with the run function that will be called later
         def _run_keyword_model(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             keyword_model = create_keyword_model(model_type, backbone_model, seed_kws=seed_kws, top_k=top_k)
@@ -267,9 +269,9 @@ class KeywordExtractionStage(PipelineStage):
         super().__init__(
             name="keyword_extraction",
             run_fn = _run_keyword_model,
-            cache_dir=checkpoints.cache_dir,
-            reuse_cache=checkpoints.reuse_keywords,
-            save_cache=checkpoints.save_keywords
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache
         )
 
 
@@ -280,9 +282,5 @@ class KeywordExtractionStage(PipelineStage):
 
 # TODO: refactor all stage subclasses to no longer save the entire config object, just the relevant parts for each stage
     # the PipelineFactory can still handle conditional logic from the CheckpointSettings object
-
-#? NOTE: planned to remove the @dataclass decorator since subclasses of dataclass can get tricky with inheritance,
-    #? but it should be fine since none of these actually use an explicit constructor
-
 
 # TODO: while I'm not really making any assignments to the Config instance, it would still be safest to pass deepcopies to avoid any accidental mutations
