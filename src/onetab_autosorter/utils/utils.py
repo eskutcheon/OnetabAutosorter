@@ -1,5 +1,4 @@
 import os
-import json
 import re
 from thefuzz import fuzz
 from itertools import permutations
@@ -9,7 +8,8 @@ from collections import defaultdict
 
 
 
-DEFAULT_IGNORE_FOLDER_NAMES = ["bookmark", "folder", "stuff", "link", "site", "website", "bar", "toolbar", "page", "menu", "list", "untitled", "other"]
+DEFAULT_IGNORE_FOLDER_NAMES = ["bookmark", "folder", "stuff", "link", "site", "website", "bar",
+                               "toolbar", "page", "menu", "list", "untitled", "other"]
 
 def generate_ignored_regex(ignored_words: List[str]) -> str:
     """ Generate a regex pattern to match all plural forms and combinations of ignored words.
@@ -22,7 +22,7 @@ def generate_ignored_regex(ignored_words: List[str]) -> str:
     words_with_plural = [word + suffix for suffix in ["", "s"] for word in ignored_words]
     # generate all permutations of 1 or 2 words
     all_combinations = set()
-    #! Careful with this because for n-grams with range (1,n) and M list elements, permutations grow exponentially as O(M^n)
+    #? NOTE: Careful with this because for n-grams with range (1,n) and M list elements, permutations grow exponentially as O(M^n)
     for i in range(1, 3):  # ngram-range of 1-2
         all_combinations.update([" ".join(p) for p in permutations(words_with_plural, i)])
     # Escape special characters and join combinations into a regex pattern
@@ -40,6 +40,7 @@ def get_keywords_from_paths(folder_list: List[str], max_depth: int = 4) -> Set[s
         Returns:
             Set[str]: Set of filtered keywords.
     """
+    #! FIXME: still needs some work on the underlying logic since some expected folders seem to be missing and it's not tossing out `root`
     # generate the regex pattern for all permutations of ignored words
     ignored_regex = generate_ignored_regex(DEFAULT_IGNORE_FOLDER_NAMES)
     #print("ignored regex pattern: ", ignored_regex)

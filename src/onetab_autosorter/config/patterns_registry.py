@@ -11,7 +11,7 @@ DEFAULT_IGNORE_PATTERNS = [
     re.compile(r"your\s+browser.*not\s+supported", re.IGNORECASE),
     re.compile(r"you\s+are\s+being\s+redirected", re.IGNORECASE),
     re.compile(r"\b[A-Fa-f0-9]{32,64}\b"),  # SHA hash or long hex
-    re.compile(r"\.py\b|\.(js|html|php|txt)\b"),  # Code files
+    re.compile(r"\.py\b|\.(js|html|php|txt)\b"),  # Code files 
 ]
 
 NAVIGATION_PATTERNS = [

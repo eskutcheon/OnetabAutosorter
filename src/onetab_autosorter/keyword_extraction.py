@@ -7,6 +7,7 @@ from termcolor import colored
 from collections import deque
 from typing import List, Tuple, Dict, Any, Optional, Union, Callable, Iterable
 # NLP topic models and backends
+from nltk.corpus import stopwords
 from keybert import KeyBERT
 from bertopic import BERTopic
 from sentence_transformers import SentenceTransformer
@@ -89,7 +90,7 @@ class BaseKeywordModel:
 
 class KeyBertKeywordModel(BaseKeywordModel):
     """ wrapper class for KeyBERT - retrieves keywords from a given text (supplemented with response headers) using KeyBERT """
-    MAX_PHRASE_LENGTH = 3
+    MAX_PHRASE_LENGTH = 2  # max number of words in a phrase to extract (e.g. 1 for unigrams, 2 for bigrams, etc.)
 
     def __init__(
         self,
@@ -106,29 +107,46 @@ class KeyBertKeywordModel(BaseKeywordModel):
             :param fetcher_fn: function to fetch summary text for each URL in batch
         """
         self.model = KeyBERT(model=model_name)
-        self.candidate_labels = candidate_labels
+        self.candidate_labels = candidate_labels if candidate_labels else None
+        self.stopwords = stopwords.words("english")
         self.top_k = top_k
+        print(f"[KEYWORD EXTRACTOR] Using KeyBERT model: {model_name}, candidate labels: {candidate_labels}, top_k: {top_k}")
 
-
-    def generate(self, entry: Dict[str, Any], supplement_text: Optional[str] = None) -> Dict[str, Any]:
-        text = self._prep_for_extraction(entry, supplement_text)
-        if not text:
-            entry["keywords"] = {}
-            return entry
-        raw = self.model.extract_keywords(
+    # TODO: make a type alias for Tuple[str, float] for keyword tuples later
+    def extract_keywords_from_text(self, text: Union[str, List[str]]) -> Union[List[Tuple[str, float]], List[List[Tuple[str, float]]]]:
+        return self.model.extract_keywords(
             text,
             candidates=self.candidate_labels,
             keyphrase_ngram_range=(1, self.MAX_PHRASE_LENGTH),
             use_mmr=True,
-            #use_maxsum=True,
-            #nr_candidates=20,
-            stop_words="english",
+            #diversity=0.75,
+            nr_candidates=20,
+            highlight=True,
+            stop_words=self.stopwords,
             top_n=self.top_k
         )
+
+    def generate(self, entry: Dict[str, Any], supplement_text: Optional[str] = None) -> Dict[str, Any]:
+        text = self._prep_for_extraction(entry, supplement_text)
+        #print(f"[KEYWORD EXTRACTOR] {entry['url']} text: {text}")
+        if not text:
+            entry["keywords"] = {}
+            return entry
+        raw = self.extract_keywords_from_text(text)
         # filtering domain keywords since they could be present from the supplementary text (keep singleton domain name though)
         refined = self.refine_keywords(raw)
         entry["keywords"] = refined
         return entry
+
+    #? NOTE: results seem a LOT better using all the text at once rather than one-by-one
+    def generate_batch(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        corpus = [self._prep_for_extraction(e, e.get("clean_text", "")) for e in entries]
+        if not corpus:
+            raise RuntimeError("[KEYWORD EXTRACTION] Something went wrong - corpus of prepared text is empty")
+        keywords = self.extract_keywords_from_text(corpus) # order of output SHOULD be preserved
+        for idx in range(len(entries)):
+            entries[idx]["keywords"] = self.refine_keywords(keywords[idx])
+        return entries
 
 
     def _generate_stream(self, entries: List[Dict[str, Any]], summaries: Optional[Dict[str, str]] = None):
@@ -140,24 +158,12 @@ class KeyBertKeywordModel(BaseKeywordModel):
         """ Process entries using a generator, no prefetching """
         return deque(self._generate_stream(tqdm(entries, desc="Processing entries", unit="entry")))
 
-    def generate_batch(self, entries: List[Dict[str, Any]], summaries: Dict[str, str]) -> deque:
-        """ Process entries in batch with pre-fetched supplemental summaries (with either Python or Java backend) """
-        return deque(self._generate_stream(entries, summaries))
-
-
     def run(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """ Unified runner that fetches, extracts keywords, and prepares data for downstream embedding or clustering """
-        # providing this to have a common interface with BERTopic - should still call one of the generator functions
-        updated = []
-        # TODO: still want to overhaul much of this class to allow the entire corpus to be passed in at once
-        for entry in tqdm(entries, desc="Running KeyBERT", unit="entry"):
-            #summary = summaries.get(entry["url"], "")
-            #summary = entry.get("scraped", "")
-            summary = entry.pop("scraped", "")
-            # TODO: eliminate summary argument later - doing this for testing purposes
-            updated_entry = self.generate(entry, summary) #, supplement_text=summary)
-            updated.append(updated_entry)
-        return updated
+        # for idx, entry in tqdm(enumerate(entries), desc="Running KeyBERT", unit="entry"):
+        #     entries[idx]["keywords"] = self.generate(entry, entry.get("clean_text", None))
+        # return entries
+        return self.generate_batch(entries)
 
 
 
@@ -179,11 +185,10 @@ class BERTopicKeywordModel(BaseKeywordModel):
         model_name: str = "all-MiniLM-L6-v2",
         candidate_labels: Optional[List[str]] = None,
         nr_topics: Union[int, str, None] = None,
-        # preprocessor: Optional[TextPreprocessingHandler] = None,
         # MIGHT NOT BE ABLE TO USE THIS SINCE THE CONFIDENCE IS OFTEN ABOUT THIS LOW
         sort_confidence_threshold = 0.01,  # threshold for sorting topic confidence scores #! setting threshold low while experimenting - update later
-        # fetcher_fn: Optional[Callable] = None
     ):
+        print(colored(f" [KEYWORD EXTRACTOR] WARNING: BERTopic model currently gives much worse results than KeyBERT!", "yellow"))
         """
             :param model_name: e.g. "all-MiniLM-L6-v2" (for the underlying sentence-transformer in BERTopic)
             :param nr_topics: If you want to reduce the number of topics, you can set nr_topics to something like "auto" or an integer.
@@ -197,8 +202,10 @@ class BERTopicKeywordModel(BaseKeywordModel):
             # `representation_model` to fine-tune the topic representations from c-TF-IDF. Models from bertopic.representation
         # TODO: also try replacing the default vectorizer model, like sklearn.feature_extraction.text.CountVectorizer
             # custom_vectorizer = CountVectorizer(stop_words="english", token_pattern=r"(?u)\b[A-Za-z]+\b")
+        candidate_labels = candidate_labels if candidate_labels else None # convert empty list to None
         self.topic_model = BERTopic(
             nr_topics = nr_topics, # can be an integer for number of topics or "auto" for automatic topic reduction
+            # seed topic list would be better to use, but it requires separation by topics
             zeroshot_topic_list=candidate_labels,  # list of candidate labels for zero-shot topic modeling
             embedding_model = SentenceTransformer(model_name),
             calculate_probabilities = True,
@@ -210,11 +217,14 @@ class BERTopicKeywordModel(BaseKeywordModel):
 
 
     def _add_topics_to_entries(self, entries: List[Dict[str, Any]], all_topics: Dict[str, Tuple[str, float]], topics: List[int], probs: np.ndarray) -> None:
+        print("shape of probabilities: ", probs.shape)
         for entry, topic_id, prob in zip(entries, topics, probs):
             # Calculate the highest topic probability
-            topic_prob = float(round(prob, 4))
+            print("probability (in loop): ", prob)
+            #topic_prob = round(float(prob), 4)
+            topic_prob = round(float(prob.max()), 4) if topic_id != -1 else 0.0
             # Mark as outlier if below the threshold
-            if topic_prob < self.topic_prob_threshold:
+            if topic_id == -1 or topic_prob < self.topic_prob_threshold:
                 entry["topic_id"] = -1
                 entry["topic_prob"] = 0.0
                 entry["topic_keywords"] = {}
@@ -238,7 +248,7 @@ class BERTopicKeywordModel(BaseKeywordModel):
         for e in tqdm(entries, desc="Cleaning Entries for Corpus"):
             # Get the text from summaries_map if present, else empty
             #raw_text = e.get("scraped_text", "")
-            raw_text = e.pop("scraped", "")
+            raw_text = e.get("clean_text", "")
             doc_text = self._prep_for_extraction(e, raw_text)
             ###### summaries_map[e["url"]] = doc_text  # update the map with the cleaned text
             corpus.append(doc_text)

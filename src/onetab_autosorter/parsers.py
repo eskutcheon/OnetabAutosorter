@@ -189,3 +189,6 @@ class NetscapeBookmarkParser(BaseParser):
         else:
             print(colored("WARNING: Folder extraction failed - no enclosing <dl> tag found", "yellow"))
         return root
+
+
+# TODO: create dispatcher function here to select the parser based on passed setting information

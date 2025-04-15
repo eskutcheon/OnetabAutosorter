@@ -7,7 +7,7 @@ sys.path.insert(0, os.path.abspath("src"))
 #from onetab_autosorter.run import run_pipeline_with_keybert, run_pipeline_with_bertopic
 from onetab_autosorter.config.config import Config, get_cfg_from_cli
 from onetab_autosorter.pipelines.factory import create_pipeline #PipelineFactory
-from pprint import pprint
+# from pprint import pprint
 
 
 

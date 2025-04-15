@@ -1,12 +1,12 @@
 import os
 import json
-from re import Pattern
 from collections import defaultdict
+from termcolor import colored
 from typing import Optional, Dict, List, Literal, Callable, Union, Any
 # local imports
 from onetab_autosorter.config.config import Config, CheckpointSettings #, get_cfg_from_cli
 from onetab_autosorter.utils.utils import detect_bookmark_format, deduplicate_entries
-from onetab_autosorter.utils.io_utils import cache_stage, compute_hash, get_hashed_path_from_string, load_json, save_json
+from onetab_autosorter.utils.io_utils import get_hashed_path_from_string, load_json, save_json
 # TODO: replace with custom type hints later - not needed as an object here
 from onetab_autosorter.parsers import BaseParser
 from onetab_autosorter.keyword_extraction import KeyBertKeywordModel, BERTopicKeywordModel
@@ -108,7 +108,7 @@ def merge_entries_with_scraped(entries: List[Dict[str, Any]], scraped_data: Dict
 # def load_entries(file_path: str, config: Config) -> List[Dict[str, Any]]:
 #     """ load entries from a file, either from cache or by parsing the original HTML file """
 #     from onetab_autosorter.utils.io_utils import compute_hash, cache_path
-#     cache_settings = config.checkpoints
+#     cache_settings = config.checkpoint_cfg
 #     parsed_hash = compute_hash(file_path)
 #     cache_file = cache_path(cache_settings.cache_dir, f"parsed_{parsed_hash}")
 #     if cache_settings.reuse_parsed and os.path.exists(cache_file):
@@ -126,25 +126,25 @@ def merge_entries_with_scraped(entries: List[Dict[str, Any]], scraped_data: Dict
 # Loaders (High-level wrapper functions)
 #& UNTESTED + UNFINISHED + UNREVIEWED
 def load_cached_data(stage_name: str, config: Config, fallback_loader: Callable):
-    cache_file = get_hashed_path_from_string(config.input_file, stage_name, config.checkpoints.cache_dir)
-    if getattr(config.checkpoints, f"reuse_{stage_name}") and os.path.exists(cache_file):
+    cache_file = get_hashed_path_from_string(config.input_file, stage_name, config.checkpoint_cfg.cache_dir)
+    if getattr(config.checkpoint_cfg, f"reuse_{stage_name}") and os.path.exists(cache_file):
         return load_json(cache_file)
     else:
         data = fallback_loader()
-        if getattr(config.checkpoints, f"save_{stage_name}"):
+        if getattr(config.checkpoint_cfg, f"save_{stage_name}"):
             save_json(cache_file, data)
         return data
 
 
-#& UNTESTED + UNFINISHED
-def run_text_filtering(preprocessor: TextPreprocessingHandler, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    for entry in entries:
-        #! FIXME: there is no "raw_html" key set in the entry dict anywhere at the moment
-        raw_html = entry.get("raw_html", "")
-        domain = entry["domain"]
-        #! FIXME: this key also doesn't exist - we should expect to call process_text() instead of process_html()
-        entry["cleaned_text"] = preprocessor.process_html(raw_html, domain)
-    return entries
+# #& UNTESTED + UNFINISHED
+# def run_text_filtering(preprocessor: TextPreprocessingHandler, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+#     for entry in entries:
+#         #! FIXME: there is no "raw_html" key set in the entry dict anywhere at the moment
+#         raw_html = entry.get("raw_html", "")
+#         domain = entry["domain"]
+#         #! FIXME: this key also doesn't exist - we should expect to call process_text() instead of process_html()
+#         entry["cleaned_text"] = preprocessor.process_html(raw_html, domain)
+#     return entries
 
 
 ##########################################################################################################################
@@ -165,13 +165,19 @@ def create_parser(file_path: str) -> BaseParser:
 
 
 def run_parser(parser: BaseParser, file_path: str, deduplicate: bool = True) -> List[Dict[str, Any]]:
+    """ run the parser on the input file and return the parsed entries """
+    ENTRY_WARNING_THRESHOLD = 30
     entries = parser.parse(file_path)
+    initial_length = len(entries)
     if deduplicate:
         entries = deduplicate_entries(entries) # using the default max url length of 200 to skip testing long urls
+        print(f"[INFO] Deduplicated entries from {initial_length} to {len(entries)}")
     if not entries:
         if deduplicate:
             raise RuntimeError("No entries found in parsed entries after deduplication.")
         raise RuntimeError("No entries found in the input file.")
+    if len(entries) < ENTRY_WARNING_THRESHOLD:
+        print(colored(f"[WARNING] Less than {ENTRY_WARNING_THRESHOLD} entries found in the input file; Quality of results will be fairly limited.", "orange"))
     return entries
 
 
@@ -216,9 +222,9 @@ def create_fetcher(scraper_type: Union[Callable, Literal["none", "java", "naive"
         return getattr(scraper, scrape_func)
     elif scraper_type == "java":
         raise NotImplementedError("Java microservice scraper needs to be refactored for use in the pipeline.")
-        from onetab_autosorter.scraper.client import ScraperServiceManager, fetch_summary_batch
-        scraper = ScraperServiceManager()
-        return scraper.fetch_within_context(fetch_summary_batch)
+        # from onetab_autosorter.scraper.client import ScraperServiceManager, fetch_summary_batch
+        # scraper = ScraperServiceManager()
+        # return scraper.fetch_within_context(fetch_summary_batch)
     elif scraper_type == "naive":
         from onetab_autosorter.scraper.scraper_utils import default_html_fetcher_batch
         return default_html_fetcher_batch
@@ -311,37 +317,10 @@ def load_entries(input_file: str) -> List[Dict[str, Any]]:
 def run_webscraping(fetcher_fn: Callable, urls: List[str]) -> Dict[str, str]:
     return fetcher_fn(urls)
 
-# @cache_stage("scraped")
-# def run_webscraping_stage(config, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-#     fetcher_fn = create_fetcher(config.scraper_type)
-#     urls = [entry["url"] for entry in entries]
-#     scraped_text = fetcher_fn(urls)
+# def run_text_filtering(preprocessor: TextPreprocessingHandler, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 #     for entry in entries:
-#         entry["raw_html"] = scraped_text.get(entry["url"], "")
-#     return entries
-
-# @cache_stage("cleaned")
-# def run_text_filtering_stage(config, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-#     domain_filter = create_domain_filter(True, "output/domain_boilerplate.json")
-#     cleaning_filter = TextCleaningFilter(ignore_patterns=config.compiled_filters)
-#     preprocessor = TextPreprocessingHandler(domain_filter, cleaning_filter)
-#     for entry in entries:
+#         #!! FIXME: handle the difference in the HTML vs text processing methods from here
+#             #? important to note that for both process_html and process_text, they expect single strings
 #         raw_html = entry.get("raw_html", "")
-#         entry["cleaned_text"] = preprocessor.process_html(raw_html, entry["domain"])
+#         entry["clean_text"] = preprocessor.process_html(raw_html, entry["domain"])
 #     return entries
-
-# @cache_stage("keywords")
-# def run_keyword_extraction_stage(config, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-#     keyword_model = create_keyword_model("keybert", config.model_name, config.seed_kws, config.keyword_top_k)
-#     for entry in entries:
-#         text = entry.get("cleaned_text", "")
-#         entry["keywords"] = keyword_model.generate(entry, text)["keywords"]
-#     return entries
-
-def run_text_filtering(preprocessor: TextPreprocessingHandler, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    for entry in entries:
-        #!! FIXME: handle the difference in the HTML vs text processing methods from here
-            #? important to note that for both process_html and process_text, they expect single strings
-        raw_html = entry.get("raw_html", "")
-        entry["cleaned_text"] = preprocessor.process_html(raw_html, entry["domain"])
-    return entries

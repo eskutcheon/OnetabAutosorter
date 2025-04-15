@@ -3,10 +3,10 @@ from typing import Optional, Dict
 from bs4 import BeautifulSoup
 from tqdm.auto import tqdm
 from typing import List, Dict, Any, Optional
-
-# Suppose we import or define these somewhere:
-from .domain_filter import DomainBoilerplateFilter
-from .text_filters import TextCleaningFilter
+from termcolor import colored, cprint
+# local imports
+from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
+from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
 from onetab_autosorter.scraper.scraper_utils import fetch_full_text
 
 
@@ -50,6 +50,21 @@ class TextPreprocessingHandler:
         # basic, regex, and domain filtering
         return self.process_text(text, domain, use_domain_filter)
 
+    def is_text_empty(self, text: str, step_name: str) -> bool:
+        if text == "":
+            print(f" [HANDLER ({step_name})] WARNING: No text to process")
+            return True
+        return False
+
+    def is_text_overcleaned(self, text: str, initial_length: int, step_name: str = "") -> bool:
+        """ Check if the text has been over-cleaned (e.g., lost too much content) """
+        OVERFILTERED_THRESHOLD = 0.05
+        if len(text) / initial_length < OVERFILTERED_THRESHOLD:
+            percent = int((1 - OVERFILTERED_THRESHOLD) * 100)
+            cprint(f" [HANDLER] WARNING: Lost over {percent}% of text ({step_name})", "yellow", attrs=["bold", "underline"])
+            return True
+        return False
+
     def process_text(
         self,
         text: str,
@@ -57,13 +72,23 @@ class TextPreprocessingHandler:
         use_domain_filter: bool = True
     ) -> str:
         """ Overload for the case where we already have plain text (no HTML) """
+        # TODO: going to move some of the warnings from the domain and cleaning filters to their respective classes
+        if self.is_text_empty(text, "before cleaning"):
+            return text
+        initial_length = len(text)
         # advanced filtering
         if self.cleaning_filter:
             text = self.cleaning_filter.filter(text, self.max_tokens)
+        if self.is_text_empty(text, "after cleaning"):
+            return text
+        if self.is_text_overcleaned(text, initial_length, step_name="after cleaning"):
+            return text
         # domain-based
         if use_domain_filter and self.domain_filter and domain:
             # call `add_entry_text` if building up the domain filter or call `.filter_boilerplate` if domain is locked
             text = self._apply_domain_filter(domain, text)
+        if text == "":
+            print(" [HANDLER (after domain filter)] WARNING: No text after domain filter")
         return text
 
 
@@ -87,37 +112,37 @@ class TextPreprocessingHandler:
 
 
 
-    #& currently unused - determine whether to keep later
-    def process_batch_html(self, html_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
-        """ Process multiple HTML documents in batch.
-            Args:
-                html_map: Dict mapping URLs to HTML content
-                domain_map: Dict mapping URLs to domain names
-            Returns:
-                Dict mapping URLs to processed text
-        """
-        results = {}
-        for url, html in tqdm(html_map.items(), desc="Processing HTML batch"):
-            domain = domain_map.get(url, "")
-            processed = self.process_html(html, domain)
-            results[url] = processed
-        return results
+    # #& currently unused - determine whether to keep later
+    # def process_batch_html(self, html_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
+    #     """ Process multiple HTML documents in batch.
+    #         Args:
+    #             html_map: Dict mapping URLs to HTML content
+    #             domain_map: Dict mapping URLs to domain names
+    #         Returns:
+    #             Dict mapping URLs to processed text
+    #     """
+    #     results = {}
+    #     for url, html in tqdm(html_map.items(), desc="Processing HTML batch"):
+    #         domain = domain_map.get(url, "")
+    #         processed = self.process_html(html, domain)
+    #         results[url] = processed
+    #     return results
 
-    #& currently unused - determine whether to keep later
-    def process_batch_text(self, text_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
-        """ Process multiple text documents in batch.
-            Args:
-                text_map: Dict mapping URLs to text content
-                domain_map: Dict mapping URLs to domain names
-            Returns:
-                Dict mapping URLs to processed text
-        """
-        results = {}
-        for url, text in tqdm(text_map.items(), desc="Processing text batch"):
-            domain = domain_map.get(url, "")
-            processed = self.process_text(text, domain)
-            results[url] = processed
-        return results
+    # #& currently unused - determine whether to keep later
+    # def process_batch_text(self, text_map: Dict[str, str], domain_map: Dict[str, str]) -> Dict[str, str]:
+    #     """ Process multiple text documents in batch.
+    #         Args:
+    #             text_map: Dict mapping URLs to text content
+    #             domain_map: Dict mapping URLs to domain names
+    #         Returns:
+    #             Dict mapping URLs to processed text
+    #     """
+    #     results = {}
+    #     for url, text in tqdm(text_map.items(), desc="Processing text batch"):
+    #         domain = domain_map.get(url, "")
+    #         processed = self.process_text(text, domain)
+    #         results[url] = processed
+    #     return results
 
 
     # def process_entries(self, entries: List[Dict[str, Any]], content_map: Dict[str, str]) -> List[Dict[str, Any]]:
@@ -139,10 +164,11 @@ class TextPreprocessingHandler:
                 # Determine if content is HTML or plain text
                 is_html = bool(content.strip().startswith(("<html", "<!DOCTYPE", "<doc")))
                 if is_html:
-                    processed = self.process_html(content, domain)
-                else:
-                    processed = self.process_text(content, domain)
+                    print(" [HANDLER] Something went wrong - didn't expect this result in the current implementation")
+                processed = self.process_html(content, domain) if is_html else self.process_text(content, domain)
                 entries[idx]["clean_text"] = processed
+                #print("[HANDLER] Processed text length for entry:", len(entries[idx]["clean_text"]))
             else:
+                print(colored(f" [HANDLER] No content found for entry '{entries[idx]['url']}'", "yellow"))
                 entries[idx]["clean_text"] = ""
         return entries

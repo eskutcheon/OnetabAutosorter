@@ -102,6 +102,6 @@ class TextCleaningFilter:
         #     text = re.sub(pattern, '', text)
         # Remove orphaned punctuation and excessive newlines
         # TODO: integrate into filter patterns or just remove entirely - seems like something any tokenizer should handle
-        text = re.sub(r'(\s[.,;:!?])|([.,;:!?]\s)', ' ', text)
+        text = re.sub(r'(\s[.,;:!?])|([.,;:!?]\s)', ' ', text) # remove orphaned punctuation
         text = re.sub(r'\n{2,}', '\n', text).strip()
         return text

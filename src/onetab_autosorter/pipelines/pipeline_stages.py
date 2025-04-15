@@ -1,7 +1,9 @@
 import os
-from dataclasses import dataclass, field
+#~ may make a protocol to annotate something as a dataclass just for clarity later
+    #~ use typing.Protocol: https://stackoverflow.com/questions/54668000/type-hint-for-an-instance-of-a-non-specific-dataclass
+from dataclasses import dataclass, field, asdict
 from re import Pattern
-from typing import Optional, Dict, List, Literal, Callable, Union, Any, Tuple
+from typing import Optional, Dict, List, Literal, Callable, Union, Any, Tuple, Generator, Iterable
 # local imports
 from onetab_autosorter.config.config import StageCacheSettings
 # TODO: replace with imports from new types file later - only used for type annotation at the moment
@@ -47,6 +49,7 @@ class PipelineStage:
     cache_dir: str
     reuse_cache: bool
     save_cache: bool
+    hash_based_on_data: bool = False
     cache_file_path: Optional[str] = None
     # #? adding a separate save function to act as a callback since making it its own stage makes less sense for a data "pipe"
     # save_cb: SaveDataCallback = None
@@ -115,50 +118,116 @@ class PipelineStage:
 
 
 
+# TODO: decide where to move this utility function later - only used in Pipeline for now
+def aggregate_settings_to_dict(settings_metadata: List[object]) -> Dict[str, Any]:
+    """ Aggregate settings metadata from dataclass objects into a dictionary """
+    if not isinstance(settings_metadata, (list, tuple)):
+        settings_metadata = [settings_metadata]
+    aggregated_metadata = {}
+    for cfg_obj in settings_metadata:
+        try:
+            aggregated_metadata.update(asdict(cfg_obj))
+        except TypeError:
+            raise TypeError("Settings metadata must be a dataclass or a dictionary.")
+        except Exception as e:
+            raise RuntimeError(f"Error while processing settings metadata: {e}") from e
+    return aggregated_metadata
+
+
 class Pipeline:
-    def __init__(self, stages: List[PipelineStage], loader_stage: PipelineStage = None):
+    def __init__(self, stages: List[PipelineStage], loader_stage: PipelineStage = None, settings_metadata: List[object] = []):
         self.stages = stages
         self.loader_stage = loader_stage
+        self.argument_stack = []  # stack of arguments and keyword arguments to be propagated
+        # populate a dict of metadata aggregated from class objects passed in settings_metadata for more robust hashing
+        self.settings_metadata = aggregate_settings_to_dict(settings_metadata)
+        self.data_only_hash = None
         self.cache_hash = None
 
-    def load_initial_data(self, initial_input) -> List[Dict[str, Any]]:
-        if self.loader_stage:
-            data, _ = self.loader_stage.run(initial_input)
-            if not data:
-                raise ValueError("No data loaded from the loader stage.")
-            if self.cache_hash is None:
+    def __iter__(self, initial_input: Any) -> Generator[Any, None, None]:
+        """ iterable to generate data in each stage while holding off on the next stage until requested """
+        data = self.load_initial_data(initial_input)  # load the initial data from the loader stage
+        for stage in self.stages:
+            data = self.run_stage(stage, data)
+            if not self.cache_hash: # data should be populated after at least the first non-loader stage
                 self.set_cache_hash(data)
-            return data
-        return initial_input
-
-    def set_cache_hash(self, data: Any):
-        if isinstance(data, list) and data and isinstance(data[0], dict) and "url" in data[0]:
-            url_str = ",".join([entry["url"] for entry in data])
-            self.cache_hash = compute_hash(url_str)
-
+            yield data
 
     def run(self, initial_input: Any) -> Any:
         data = self.load_initial_data(initial_input)  # load the initial data from the loader stage
-        feedforward_args: List[Tuple[List, Dict]] = []
+        # feedforward_args: List[Tuple[List, Dict]] = []
         for stage in self.stages:
-            if self.cache_hash:
-                stage.set_cache_file(self.cache_hash, data)
-            # try to pop the last set of args and kwargs for the current stage and default to empty if not available
-            try:
-                args, kwargs = feedforward_args.pop()
-            except IndexError: # if feedforward_args is empty, set args and kwargs to relevant empty data structures
-                args, kwargs = [], {}
-            except Exception as e: # raise any other exceptions that may occur
-                raise RuntimeError(f"Error while processing stage {stage.name}: {e}")
-            data, next_args = stage.run(data, *args, **kwargs)  # run the stage with the data and any additional arguments
-            feedforward_args.append(next_args)  # collect additional arguments for the next stage (empty by default)
+            data = self.run_stage(stage, data)  # run each stage with the data and any additional arguments
             # save the data by calling a dispatcher function that calls the appropriate saving function based on the data type
                 # it should take a variable number of positional arguments for potentially multiple data
-            ###some_central_saving_function(data, output_path=stage.save_ckpt_path)  # replace with actual saving logic
             if not self.cache_hash: # data should be populated after at least the first non-loader stage
                 self.set_cache_hash(data)
         return data
 
+    def run_stage(self, stage: PipelineStage, data: Any) -> Tuple[Any, Tuple[List, Dict]]:
+        """ Run a specific stage of the pipeline with the given data and arguments.
+            Args:
+                stage (PipelineStage): The stage to run.
+                data (Any): The input data for the stage.
+                *args: Additional positional arguments for the stage.
+                **kwargs: Additional keyword arguments for the stage.
+            Returns:
+                Tuple[Any, Tuple[List, Dict]]: The processed data and objects to propagate to the next stage.
+        """
+        if self.cache_hash:
+            # if the stage is only data-dependent, don't use setting metadata to compute the hash (ensures no recomputation when not needed)
+            hash = self.data_only_hash if stage.hash_based_on_data else self.cache_hash
+            stage.set_cache_file(hash, data)
+        # try to pop the last set of args and kwargs for the current stage and default to empty if not available
+        args, kwargs = self.pop_argument_stack(stage.name)
+        # run the stage with the data and any additional arguments from the argument stack
+        data, next_args = stage.run(data, *args, **kwargs)
+        self.argument_stack.append(next_args)  # collect additional arguments for the next stage (empty by default)
+        return data
+
+    def load_initial_data(self, initial_input) -> List[Dict[str, Any]]:
+        if not self.loader_stage:
+            #? NOTE: should be temporary but this is how I'm handling the initial loading phase of the pipeline for now
+            raise RuntimeError("No loader stage defined for the pipeline.")
+        data, _ = self.loader_stage.run(initial_input)
+        if not data:
+            raise ValueError("No data loaded from the loader stage.")
+        if self.cache_hash is None:
+            self.set_cache_hash(data)
+        return data
+        #return initial_input
+
+    def set_cache_hash(self, data: Any):
+        # TODO: make this condition a little more robust to different types and data formats
+        if isinstance(data, list) and data and isinstance(data[0], dict) and "url" in data[0]:
+            data_only_hash = ",".join([entry["url"] for entry in data])
+            # if the stage is only data-dependent, don't use setting metadata to compute the hash (ensures no recomputation when not needed)
+            if self.settings_metadata:
+                metadata_str = ",".join([f"{k}={v}" for k, v in self.settings_metadata.items() if v])
+                metadata_str = ",".join(metadata_str) + data_only_hash
+                self.cache_hash = compute_hash(metadata_str)
+            else:
+                self.cache_hash = compute_hash(data_only_hash)
+            self.data_only_hash = compute_hash(data_only_hash)
+        else:
+            raise ValueError("Data must be a list of dictionaries with 'url' keys to compute the cache hash.")
+
+    def pop_argument_stack(self, stage_name: Optional[str] = "_") -> Tuple[List, Dict]:
+        """ Pop the last set of arguments and keyword arguments from the feedforward_args stack.
+            Args:
+                feedforward_args (List[Tuple[List, Dict]]): A stack of arguments and keyword arguments to be propagated.
+            Returns:
+                Tuple[List, Dict]: A tuple containing the popped arguments (list) and keyword arguments (dict).
+            Raises:
+                RuntimeError: If an error occurs while processing the stack.
+        """
+        try:
+            args, kwargs = self.argument_stack.pop()
+        except IndexError: # if feedforward_args is empty, set args and kwargs to corresponding empty data structures
+            args, kwargs = [], {}
+        except (TypeError, ValueError) as e:  # handle specific exceptions
+            raise RuntimeError(f"Error while processing stage {stage_name}: {e}") from e
+        return args, kwargs
 
 
 """
@@ -183,7 +252,8 @@ class ParsingStage(PipelineStage):
             name=stage_settings.stage_name,
             cache_dir=stage_settings.cache_dir,
             reuse_cache=stage_settings.load_cache,
-            save_cache=stage_settings.save_cache
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
         )
 
     def create_stage_objects(self, data: Any, *args, **kwargs) -> None:
@@ -205,7 +275,8 @@ class WebScrapingStage(PipelineStage):
             name=stage_settings.stage_name,
             cache_dir=stage_settings.cache_dir,
             reuse_cache=stage_settings.load_cache,
-            save_cache=stage_settings.save_cache
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
         )
 
     def create_stage_objects(self, data: Any, *args, **kwargs) -> None:
@@ -237,7 +308,8 @@ class DomainFilterFittingStage(PipelineStage):
             name=stage_settings.stage_name,
             cache_dir=stage_settings.cache_dir,
             reuse_cache=False, # stage_settings.load_cache, #! still haven't addressed loading the domain boilerplate filter from file yet
-            save_cache=stage_settings.save_cache
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
         )
 
     def create_stage_objects(self, data: List[Dict[str, Any]], fetcher_fn: Callable = None, *args, **kwargs) -> None:
@@ -278,7 +350,8 @@ class TextPreprocessingStage(PipelineStage):
             name=stage_settings.stage_name,
             cache_dir=stage_settings.cache_dir,
             reuse_cache=stage_settings.load_cache,
-            save_cache=stage_settings.save_cache
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
         )
 
     def create_stage_objects(self, data: List[Dict[str, Any]], domain_filter: DomainBoilerplateFilter = None, *args, **kwargs) -> None:
@@ -313,7 +386,8 @@ class KeywordExtractionStage(PipelineStage):
             name=stage_settings.stage_name,
             cache_dir=stage_settings.cache_dir,
             reuse_cache=stage_settings.load_cache,
-            save_cache=stage_settings.save_cache
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
         )
 
     def create_stage_objects(self, data: List[Dict[str, Any]], preprocessor = None, *args, **kwargs) -> None:
@@ -333,12 +407,3 @@ class KeywordExtractionStage(PipelineStage):
         return [], {"keyword_model": self.keyword_model}
 
 
-
-
-
-
-
-# TODO: refactor all stage subclasses to no longer save the entire config object, just the relevant parts for each stage
-    # the PipelineFactory can still handle conditional logic from the CheckpointSettings object
-
-# TODO: while I'm not really making any assignments to the Config instance, it would still be safest to pass deepcopies to avoid any accidental mutations

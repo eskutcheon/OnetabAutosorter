@@ -32,6 +32,7 @@ def entries_to_dataframe(entries: List[Dict[str, Any]], keyword_field: str = "ke
 
 
 def embed_column(df: pl.DataFrame, column: str, model_name="all-MiniLM-L6-v2") -> np.ndarray:
+    """ creates embeddings for the specified column using the specified model (used primarily to pass column="keywords" for now) """
     model = SentenceTransformer(model_name)
     texts = df[column].to_list()
     return model.encode(texts, show_progress_bar=True)
@@ -41,8 +42,9 @@ def enrich_with_metadata(df: pl.DataFrame) -> pl.DataFrame:
     return df.with_columns([
         pl.col("keywords_text").str.len_chars().alias("kw_length"),
         #! simulating length just to add more numeric features - BUT these fields may be totally worthless for clustering
-        pl.col("domain").str.len_chars().alias("domain_length"),
-        pl.col("group_ids").str.count_matches(",").alias("group_count"),
+        # pl.col("domain").str.len_chars().alias("domain_length"),
+        # TODO: replace purely scalar feature below with group_ids linking other URLs in this one (as a contextual feature)
+        # pl.col("group_ids").str.count_matches(",").alias("group_count"),
     ])
 
 

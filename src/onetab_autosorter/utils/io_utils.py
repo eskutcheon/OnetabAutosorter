@@ -75,22 +75,22 @@ def save_json(file_path: str, data: Dict):
 #~ it would be great for avoiding the super high dependence on the config object
     #~ also really think the config objects should only be managed within the pipeline factory
     #~ while it acts as dispatcher for wrapping the stages' utility functions
-def cache_stage(stage_name: str):
-    """Decorator to automatically cache the result of a stage based on input arguments."""
-    def decorator(func: Callable):
-        @functools.wraps(func)
-        def wrapper(config, *args, **kwargs):
-            cache_file = get_hashed_path_from_string(config.input_file, stage_name, config.checkpoints.cache_dir)
-            reuse_flag = getattr(config.checkpoints, f"reuse_{stage_name}", True)
-            save_flag = getattr(config.checkpoints, f"save_{stage_name}", True)
-            if reuse_flag and os.path.exists(cache_file):
-                print(f"Loading cached data for '{stage_name}' stage from {cache_file}")
-                return load_json(cache_file)
-            print(f"No cached data found or reuse disabled for '{stage_name}'. Running stage...")
-            result = func(config, *args, **kwargs)
-            if save_flag:
-                save_json(cache_file, result)
-                print(f"Saved cached data for '{stage_name}' stage at {cache_file}")
-            return result
-        return wrapper
-    return decorator
+# def cache_stage(stage_name: str):
+#     """Decorator to automatically cache the result of a stage based on input arguments."""
+#     def decorator(func: Callable):
+#         @functools.wraps(func)
+#         def wrapper(config, *args, **kwargs):
+#             cache_file = get_hashed_path_from_string(config.input_file, stage_name, config.checkpoints.cache_dir)
+#             reuse_flag = getattr(config.checkpoints, f"reuse_{stage_name}", True)
+#             save_flag = getattr(config.checkpoints, f"save_{stage_name}", True)
+#             if reuse_flag and os.path.exists(cache_file):
+#                 print(f"Loading cached data for '{stage_name}' stage from {cache_file}")
+#                 return load_json(cache_file)
+#             print(f"No cached data found or reuse disabled for '{stage_name}'. Running stage...")
+#             result = func(config, *args, **kwargs)
+#             if save_flag:
+#                 save_json(cache_file, result)
+#                 print(f"Saved cached data for '{stage_name}' stage at {cache_file}")
+#             return result
+#         return wrapper
+#     return decorator

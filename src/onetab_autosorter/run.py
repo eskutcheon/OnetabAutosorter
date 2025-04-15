@@ -9,11 +9,11 @@ from onetab_autosorter.config.config import Config
 from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler
 from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
 from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
-from onetab_autosorter.utils.io_utils import PythonSetEncoder, compute_hash
+from onetab_autosorter.utils.io_utils import PythonSetEncoder
 from onetab_autosorter.pipelines.staging_utils import load_entries, create_fetcher, create_and_fit_domain_filter
 
 
-
+#!!!! MAJORITY OF FILE DEPRECATED - USE `create_pipeline` in `pipelines/factory.py` INSTEAD
 
 
 # should be temporary with the new pipeline structure but I need to do regression testing on the keyword models:
@@ -151,15 +151,19 @@ def embedding_test(entries: List[Dict[str, Any]], config: Config):
         generate_cluster_labels_zero_shot,
         #generate_cluster_labels_llm,
     )
-    df = entries_to_dataframe(entries)
+    kw_key = "keywords" if config.keyword_model == "keybert" else "topic_keywords"
+    df = entries_to_dataframe(entries, keyword_field = kw_key)
     print("top 10 entries: ", df.head(10))
     df_meta = enrich_with_metadata(df)
     print("top 10 metadata: ", df_meta.head(10))
     embeddings = embed_column(df, "keywords_text")
     print("embeddings shape: ", embeddings.shape)
     print("embeddings: ", embeddings[:5])
-    combined = concatenate_embeddings(embeddings, df_meta.select(["kw_length", "domain_length", "group_count"]))
+    #! FIXME: the combined dataframe is only using embeddings and the columns below - change later
+    combined = concatenate_embeddings(embeddings, df_meta.select(["kw_length", "keyword_weight_sum"])) #"domain_length", "group_count"]))
     print("combined shape: ", combined.shape)
+    ##############################################################################################################
+    # clustering steps - separate later
     cluster_results = cluster_hdbscan(combined, min_cluster_size=5)
     print("cluster results: ", cluster_results)
     df_clustered = inject_cluster_results(df, cluster_results["labels"], cluster_results["scores"])

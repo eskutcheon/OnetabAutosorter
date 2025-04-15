@@ -6,6 +6,9 @@ from tqdm.auto import tqdm
 from dataclasses import dataclass, field
 from collections import defaultdict #, Counter
 from sklearn.feature_extraction.text import TfidfVectorizer
+import nltk
+from nltk.corpus import stopwords
+nltk.download("stopwords")
 #import numpy as np
 from typing import List, Dict, Set, Callable, Optional, Union, Any
 # local imports
@@ -54,11 +57,12 @@ class DomainFilterData:
 
 class DomainBoilerplateFilter:
     """ Domain-wide TF-IDF based boilerplate detection and filtering. """
-    def __init__(self, min_domain_samples=5, min_df_ratio=0.8, ngram_range=(2, 10), max_features=1000):
+    def __init__(self, min_domain_samples=5, min_df_ratio=1.0, ngram_range=(2, 8), max_features=1000):
         self.min_domain_samples = min_domain_samples
         self.min_df_ratio = min_df_ratio
         self.ngram_range = ngram_range
         self.max_features = max_features
+        self.stopwords = stopwords.words("english")
         self.domain_data_map: Dict[str, DomainFilterData] = defaultdict(DomainFilterData)
 
     def run_preliminary_search(self, domain_map: Dict[str, List[str]], min_domain_size: int = 2, html_fetcher_fn: Optional[Callable] = None):
@@ -81,7 +85,7 @@ class DomainBoilerplateFilter:
             try:
                 text_map = {e["url"]: e["scraped"] for e in domain_entries}
             except KeyError: # keeping this here just for backward compatibility with the old format for now
-                print(termcolor.colored(f"WARNING: domain {domain} has no scraped data!", color="yellow"))
+                print(termcolor.colored(f" [DOMAIN FILTER] WARNING: domain {domain} has no scraped data!", color="yellow"))
                 urls = [e["url"] for e in domain_entries]
                 text_map = html_fetcher_fn(urls) if html_fetcher_fn else {url: "" for url in urls}
             for url, raw_text in text_map.items():
@@ -119,14 +123,15 @@ class DomainBoilerplateFilter:
         #     return
         vectorizer = TfidfVectorizer(
             #! fails on some domains that may be only stopwords - their docs even say to rethink using `stopwords="english"`
-            #stop_words="english",
-            strip_accents="unicode",
-            ngram_range=self.ngram_range,
+            stop_words = self.stopwords,
+            strip_accents = "unicode",
+            ngram_range = self.ngram_range,
             #max_features=self.max_features,
             min_df = self.min_df_ratio,
-            lowercase=True,
-            token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b"
+            lowercase = True,
+            #token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b"
         )
+        #print(f"total length of {domain} texts: {sum([len(text) for text in self.domain_data_map[domain].texts])}")
         _ = vectorizer.fit_transform(self.domain_data_map[domain].texts)
         repeated_phrases = vectorizer.get_feature_names_out()
         repeated_phrases = filter_disjoint_boilerplate(repeated_phrases)
@@ -139,21 +144,23 @@ class DomainBoilerplateFilter:
         domain_data = self.get_domain_data(domain)
         if not domain_data.boilerplate: # or not domain_data.locked:
             return text
+        if text in ["", " "]:
+            print(termcolor.colored(f" [DOMAIN FILTER] Warning: text passed to domain filter is empty!", color="yellow"))
         # Efficiently filter text using precompiled regex
         pattern = re.compile('|'.join(re.escape(bp) for bp in sorted(domain_data.boilerplate, key=len, reverse=True)), re.IGNORECASE)
         filtered_text = pattern.sub('', text)
-        if text != "" and filtered_text == text:
-            print(termcolor.colored(f"WARNING '{domain}' filtered text is the same as original text!", color="yellow"))
+        # if text != "" and filtered_text == text:
+        #     print(termcolor.colored(f"WARNING '{domain}' filtered text is the same as original text!", color="yellow"))
         return filtered_text.strip()
 
     def save_boilerplate_map(self, json_path: str, override: bool = False):
         if override or not os.path.exists(json_path):
             out_data = {domain: sorted(list(data.boilerplate)) for domain, data in self.domain_data_map.items()}
             if not out_data:
-                print(termcolor("WARNING: domain boilerplate data empty when saving to JSON!", color="yellow"))
+                print(termcolor(" [DOMAIN FILTER] WARNING: domain boilerplate data empty when saving to JSON!", color="yellow"))
             with open(json_path, "w", encoding="utf-8") as fptr:
                 json.dump(out_data, fptr, indent=2)
-            print(termcolor.colored(f"Saved extracted domain boilerplate to {json_path}.", color="green"))
+            print(termcolor.colored(f" [DOMAIN FILTER] Saved extracted domain boilerplate to {json_path}.", color="green"))
 
     @classmethod
     def load_boilerplate_map(cls, json_path: str, **kwargs):
