@@ -183,3 +183,4 @@ micronaut_scraper/gradlew.bat
 output/
 planning.md
 sample.html
+cache/

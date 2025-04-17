@@ -9,7 +9,7 @@ import onetab_autosorter.pipelines.pipeline_stages as pipe_stages
 #DEFAULT_STAGES = ["parsed", "scraped", "domain_filter", "cleaned", "keywords", "embeddings", "clustered", "final_output"]
 
 
-
+#? might rename the file to "builder.py" or something since this is actually a builder method
 def create_pipeline(config: Config) -> pipe_stages.Pipeline:
     # TODO: still need to add the remaining conditional logic
     stages = []
@@ -32,9 +32,9 @@ def create_pipeline(config: Config) -> pipe_stages.Pipeline:
         stages.append(scraping_stage)
     #! replace with config arguments later
     HARDCODED_DOMAIN_FILTER_KWARGS = {
-        "min_domain_samples": 6,
-        "min_df_ratio": 0.6,
-        "ngram_range": (2, 5),
+        "min_domain_samples": 8,
+        "min_phrase_freq": 0.75,
+        "ngram_range": (2, 10),
         "max_features": 1000,
     }
     # optional domain filter (initial fitting) stage

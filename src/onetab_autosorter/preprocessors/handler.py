@@ -6,8 +6,8 @@ from typing import List, Dict, Any, Optional
 from termcolor import colored, cprint
 # local imports
 from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
-from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter
-from onetab_autosorter.scraper.scraper_utils import fetch_full_text
+from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter, EnhancedTextCleaningFilter
+from onetab_autosorter.scraper.scraper_utils import fetch_full_text, extract_main_content
 
 
 
@@ -24,7 +24,7 @@ class TextPreprocessingHandler:
         self,
         domain_filter: DomainBoilerplateFilter = None,
         cleaning_filter: TextCleaningFilter = None,
-        max_tokens=400,
+        max_tokens: int = 400,
     ):
         """
             :param domain_filter: an instance of DomainBoilerplateFilter (optional).
@@ -35,7 +35,7 @@ class TextPreprocessingHandler:
         self.cleaning_filter = cleaning_filter
         self.max_tokens = max_tokens
         ### assuming that the domain filter has been trained already (need to iron out that logic):
-        self.domain_names = self.domain_filter.get_present_domains()
+        self.domain_names = self.domain_filter.get_present_domains() if domain_filter else []
 
     def process_html(
         self,
@@ -168,6 +168,110 @@ class TextPreprocessingHandler:
                 processed = self.process_html(content, domain) if is_html else self.process_text(content, domain)
                 entries[idx]["clean_text"] = processed
                 #print("[HANDLER] Processed text length for entry:", len(entries[idx]["clean_text"]))
+            else:
+                print(colored(f" [HANDLER] No content found for entry '{entries[idx]['url']}'", "yellow"))
+                entries[idx]["clean_text"] = ""
+        return entries
+
+
+
+
+class EnhancedTextPreprocessingHandler(TextPreprocessingHandler):
+    """ Enhanced text preprocessing handler with improved content extraction """
+    def __init__(
+        self,
+        domain_filter: DomainBoilerplateFilter = None,
+        cleaning_filter: TextCleaningFilter = None,
+        max_tokens: int = 400,
+    ):
+        self.domain_filter = domain_filter
+        self.cleaning_filter = cleaning_filter or EnhancedTextCleaningFilter()  # Use enhanced filter by default
+        self.max_tokens = max_tokens
+        self.domain_names = self.domain_filter.get_present_domains() if domain_filter else []
+        self.content_quality_stats = {}  # Track quality metrics per domain
+
+    def process_html(
+        self,
+        raw_html: str,
+        domain: Optional[str] = None,
+        url: Optional[str] = None,
+        use_domain_filter: bool = True
+    ) -> str:
+        """ Process HTML with enhanced content extraction. """
+        # Parse and identify main content block
+        soup = BeautifulSoup(raw_html, "html.parser")
+        # Extract relevant text with priority on important sections
+        text = extract_main_content(soup, self.max_tokens)
+        # Process using text pipeline
+        return self.process_text(text, domain, use_domain_filter)
+
+    def process_text(
+        self,
+        text: str,
+        domain: Optional[str] = None,
+        use_domain_filter: bool = True
+    ) -> str:
+        """ Process text with enhanced cleaning and filtering. """
+        if self.is_text_empty(text, "before cleaning"):
+            return text
+        initial_length = len(text)
+        initial_token_count = len(text.split())
+        # Apply text cleaning filter
+        if self.cleaning_filter:
+            text = self.cleaning_filter.filter(text, self.max_tokens)
+        if self.is_text_empty(text, "after cleaning"):
+            self._update_quality_stats(domain, 'overcleaned', True)
+            return text
+        # Check if overcleaned
+        if self.is_text_overcleaned(text, initial_length, "after cleaning"):
+            self._update_quality_stats(domain, 'overcleaned', True)
+        # Apply domain-based filtering
+        if use_domain_filter and self.domain_filter and domain:
+            pre_domain_filter_length = len(text)
+            text = self._apply_domain_filter(domain, text)
+            # Track domain filter impact
+            if text and pre_domain_filter_length > 0:
+                reduction_pct = 1 - (len(text) / pre_domain_filter_length)
+                self._update_quality_stats(domain, 'domain_filter_reduction', reduction_pct)
+        if text == "":
+            self._update_quality_stats(domain, 'final_empty', True)
+            print(" [HANDLER] WARNING: No text after all processing")
+        return text
+
+    def _update_quality_stats(self, domain: str, metric: str, value):
+        """Track quality statistics for later analysis."""
+        if not domain:
+            return
+        if domain not in self.content_quality_stats:
+            self.content_quality_stats[domain] = {}
+        if metric not in self.content_quality_stats[domain]:
+            self.content_quality_stats[domain][metric] = []
+        self.content_quality_stats[domain][metric].append(value)
+
+    def get_quality_report(self):
+        """Generate a report of content quality metrics."""
+        report = {}
+        for domain, metrics in self.content_quality_stats.items():
+            report[domain] = {}
+            for metric, values in metrics.items():
+                if metric == 'overcleaned' or metric == 'final_empty':
+                    report[domain][metric] = sum(values) / len(values) if values else 0
+                else:
+                    report[domain][metric] = sum(values) / len(values) if values else 0
+        return report
+
+    def process_entries(self, entries: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """ Enhanced entry processing with quality tracking. """
+        for idx, entry in enumerate(tqdm(entries, desc="Processing entries")):
+            domain = entry.get("domain", "")
+            content = entry.pop("scraped", None)
+            if content:
+                is_html = bool(content.strip().startswith(("<html", "<!DOCTYPE", "<doc")))
+                processed = self.process_html(content, domain, entry.get("url", "")) if is_html else self.process_text(content, domain)
+                entries[idx]["clean_text"] = processed
+                # Track content quality
+                self._update_quality_stats(domain, 'final_length', len(processed) if processed else 0)
+                self._update_quality_stats(domain, 'final_token_count', len(processed.split()) if processed else 0)
             else:
                 print(colored(f" [HANDLER] No content found for entry '{entries[idx]['url']}'", "yellow"))
                 entries[idx]["clean_text"] = ""

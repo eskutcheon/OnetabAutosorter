@@ -9,7 +9,7 @@ from bs4 import BeautifulSoup
 import time
 import threading
 # local imports
-from onetab_autosorter.scraper.scraper_utils import safe_fetch, fetch_full_text, write_failed_fetch_log
+from onetab_autosorter.scraper.scraper_utils import safe_fetch, fetch_full_text, extract_main_content, write_failed_fetch_log
 
 #! The multi-threaded approach is faster now but doesn't include rate limiting, so this should still be the preferred option with the Python approach
 
@@ -20,7 +20,7 @@ class WebScraper:
             max_workers (int): maximum number of concurrent workers for fetching URLs
             interleave_domains (bool): whether to interleave URLs by domain to evenly distribute requests
     """
-    def __init__(self, rate_limit_delay: float = 1.0, max_workers: int = 10, interleave_domains: bool = True):
+    def __init__(self, rate_limit_delay: float = 2.0, max_workers: int = 10, interleave_domains: bool = True):
         self.rate_limit_delay = rate_limit_delay
         self.max_workers = max_workers
         self.interleave_domains = interleave_domains
@@ -83,7 +83,7 @@ class WebScraper:
             async with session.get(url, timeout=10) as resp:
                 text = await resp.text()
                 soup = BeautifulSoup(text, "html.parser")
-                return fetch_full_text(soup)
+                return extract_main_content(soup) #fetch_full_text(soup)
         except Exception as e:
             write_failed_fetch_log(url, e)
             return ""

@@ -180,6 +180,7 @@ class BERTopicKeywordModel(BaseKeywordModel):
         6. Assigns topic labels and representative topic keywords to each entry
         #!!! Unlike KeyBERT, BERTopic is not doc-by-doc. It needs the entire corpus in one pass. !!!
     """
+    MAX_PHRASE_LENGTH = 2  # max number of words in a phrase to extract (e.g. 1 for unigrams, 2 for bigrams, etc.)
     def __init__(
         self,
         model_name: str = "all-MiniLM-L6-v2",
@@ -209,7 +210,7 @@ class BERTopicKeywordModel(BaseKeywordModel):
             zeroshot_topic_list=candidate_labels,  # list of candidate labels for zero-shot topic modeling
             embedding_model = SentenceTransformer(model_name),
             calculate_probabilities = True,
-            n_gram_range = (1, 3),  # unigrams, bigrams, and trigrams
+            n_gram_range = (1, self.MAX_PHRASE_LENGTH),  # unigrams, bigrams, and trigrams
             verbose = True
         )
         # set the confidence threshold for topic probabilities
@@ -220,7 +221,6 @@ class BERTopicKeywordModel(BaseKeywordModel):
         print("shape of probabilities: ", probs.shape)
         for entry, topic_id, prob in zip(entries, topics, probs):
             # Calculate the highest topic probability
-            print("probability (in loop): ", prob)
             #topic_prob = round(float(prob), 4)
             topic_prob = round(float(prob.max()), 4) if topic_id != -1 else 0.0
             # Mark as outlier if below the threshold

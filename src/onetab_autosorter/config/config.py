@@ -16,7 +16,8 @@ SUPPORTED_MODEL_BACKBONES = [
     "all-distilroberta-v1",
     "all-mpnet-base-v2",
     "allenai/scibert_scivocab_uncased",
-    "intfloat/e5-base-v2"
+    "intfloat/e5-base-v2",
+    "distilroberta-base"
 ]
 DEFAULT_STAGES = ["parsed", "scraped", "domain_filter", "cleaned", "keywords", "embeddings", "clustered", "final_output"]
 DEFAULT_STAGE_SETTINGS = {
@@ -81,7 +82,7 @@ class ModelingSettings:
     seed_kws_from_html: Optional[str] = None  # path to the file containing seed keywords for keyword extraction
 
     def __post_init__(self):
-        if self.model_name.lower() not in SUPPORTED_MODEL_BACKBONES:
+        if self.model_name not in SUPPORTED_MODEL_BACKBONES:
             raise ValueError(f"Unsupported model backbone: {self.model_name}. Supported models are: {SUPPORTED_MODEL_BACKBONES}")
         if self.keyword_model.lower() not in KEYWORD_MODEL_NAMES:
             if self.keyword_model.lower() == "berttopic":
