@@ -54,7 +54,7 @@ class TextCleaningFilter:
             tokens = tokens[:max_num_tokens]
         if len(tokens) < self.min_word_count:
             return ""
-        return self.clean_text(' '.join(tokens))
+        return ' '.join(tokens)
 
 
     def _register_ignore_patterns(self, patterns: Union[str, re.Pattern, List[Union[str, re.Pattern]]]) -> None:
@@ -67,46 +67,6 @@ class TextCleaningFilter:
             self.ignore_patterns.extend([re.compile(p, re.IGNORECASE) if isinstance(p, str) else p for p in patterns])
         else:
             raise ValueError(f"ignore patterns must be a string, regex pattern, or a list of strings/regex patterns; got {type(patterns)}")
-
-    def _get_stopword_set(self, file_path: str) -> Set[str]:
-        if not os.path.isfile(file_path):
-            return []  # return empty list if the file doesn't exist
-        with open(file_path, "r", encoding="utf-8") as f:
-            stopwords = f.read().splitlines()
-        stopwords = [sw.strip().lower() for sw in stopwords if sw.strip()]  # clean and lower-case
-        return set(stopwords)
-
-
-    def _matches_ignore_pattern(self, line: str) -> bool:
-        for pattern in self.ignore_patterns:
-            if pattern.search(line.lower()):
-                return True
-        return False
-
-    def _filter_stopwords_from_text(self, text: str) -> str:
-        """ Filter out stopwords from a text string. """
-        tokens = self._filter_stopwords_from_tokens(text.split())
-        if not tokens:
-            return ""
-        return " ".join(tokens)  # filter out stopwords
-
-    def _filter_stopwords_from_tokens(self, tokens: List[str]) -> List[str]:
-        """ Filter out stopwords from a list of tokens. """
-        return [t for t in tokens if t.lower() not in self.stopwords]
-
-    @staticmethod
-    def clean_text(text: str) -> str:
-        # # Remove metadata patterns
-        # for pattern in pattern_cfg.NAVIGATION_PATTERNS:
-        #     text = re.sub(pattern, '', text, flags=re.IGNORECASE)
-        # # Remove unwanted formatting
-        # for pattern in pattern_cfg.FORMATTING_PATTERNS:
-        #     text = re.sub(pattern, '', text)
-        # Remove orphaned punctuation and excessive newlines
-        # TODO: integrate into filter patterns or just remove entirely - seems like something any tokenizer should handle
-        text = re.sub(r'(\s[.,;:!?])|([.,;:!?]\s)', ' ', text) # remove orphaned punctuation
-        text = re.sub(r'\n{2,}', '\n', text).strip()
-        return text
 
 
 
@@ -150,17 +110,8 @@ class EnhancedTextCleaningFilter(TextCleaningFilter):
         if not text:
             return ""
         # Apply ignore patterns first for efficiency
-        # #! REMOVE LATER - for debugging
-        # text_len = len(text)
-        # start_time = time.time() if text_len > 10000 else None
-        # if text_len > 10000:
-        #     print(f"WARNING: Text length exceeds 10000 characters: {text_len}; execution likely to be slow")
         for pattern in self.ignore_patterns:
-            # if text_len > 10000:
-            #     print(f"Applying ignore pattern: {pattern.pattern}")
             text = pattern.sub(' ', text)
-        # if start_time:
-        #     print(f"Time taken for ignore patterns: {time.time() - start_time:.4f} seconds")
         # Text normalization preprocessing
         text = self._normalize_text(text)
         # Tokenize the text
@@ -194,9 +145,9 @@ class EnhancedTextCleaningFilter(TextCleaningFilter):
         text = re.sub(r'([;:,.!?()])', r' \1 ', text)
         # fix camelCase and PascalCase words that might be running together
         text = re.sub(r'([a-z])([A-Z])', r'\1 \2', text)
-        # remove URLs completely (adding a space to preserve word boundaries)
-        text = re.sub(r'https?://\S+', ' ', text)
-        text = re.sub(r'www\.\S+', ' ', text)
+        # # remove URLs completely (adding a space to preserve word boundaries)
+        # text = re.sub(r'https?://\S+', ' ', text)
+        # text = re.sub(r'www\.\S+', ' ', text)
         # horizontal whitespace only (preserving line breaks)
         text = re.sub(r'[ \t]+', ' ', text)
         # final cleanup of excess spaces
@@ -204,7 +155,7 @@ class EnhancedTextCleaningFilter(TextCleaningFilter):
         return text.strip()
 
     def _filter_by_pos_tags(self, tokens: List[str]) -> List[str]:
-        """ Filter tokens based on part-of-speech tags using NLTK's PerceptronTagger to keep only content-rich words 
+        """ Filter tokens based on part-of-speech tags using NLTK's PerceptronTagger to keep only content-rich words
             Keep token if:
                 1. It's a content word (matches one of our POS tags)
                 2. Not a stopword

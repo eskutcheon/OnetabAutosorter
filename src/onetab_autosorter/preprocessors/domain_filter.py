@@ -37,11 +37,6 @@ def filter_disjoint_boilerplate(phrases: List[str]) -> Set[str]:
     return selected_phrases
 
 
-def is_only_stopwords(text: str, stopwords: List[str]) -> bool:
-    """ Checks if the text consists only of stopwords """
-    text_copy = re.sub(r"[^\w\s]", "", text) # remove punctuation and special characters
-    tokens = set(text_copy.lower().split())
-    return all(token in stopwords for token in tokens)
 
 
 # def _fix_code_spacing(text: str) -> str:
@@ -122,10 +117,6 @@ class DomainBoilerplateFilter:
             sampling_size = min(domain_counts[domain], self.min_domain_samples)
             # fetch a only as many pages as needed
             domain_entries: List[Dict[str, Any]] = domain_map[domain][:sampling_size]
-            #? TEMPORARY - might make it conditional until it gets a better rewrite
-            #! previous implementation using html_fetcher_fn as function argument - now assuming bulk webscraping comes first
-            # fetch HTML information from HTTP requests in a batch
-            #text_map = html_fetcher_fn(urls) if html_fetcher_fn else {url: "" for url in urls}
             try:
                 # aggregate text and filter out empty strings simultaneously
                 text_map = {e["url"]: text for e in domain_entries if (text := e.get("scraped", "")) != ""}
@@ -146,208 +137,6 @@ class DomainBoilerplateFilter:
                 _ = self.domain_data_map.pop(domain, None)
         # forcefully finalize any domain that didn't meet min_domain_samples but was greater than min_domain_size (so text is in the buffer)
         self.force_finalize_all()
-
-
-    def get_domain_data(self, domain: str) -> DomainFilterData:
-        #? NOTE: relies on defaultdict values if domain doesn't yet exist
-        return self.domain_data_map[domain]
-
-    def _normalize_text(self, text: str) -> str:
-        """ Normalize text by removing extra whitespace """
-        if not text:
-            return ""
-        # Basic normalization - remove excess whitespace
-        return re.sub(r'\s+', ' ', text).strip()
-
-    def get_present_domains(self):
-        return list(self.domain_data_map.keys())
-
-    def add_entry_text(self, domain: str, text: str):
-        domain_data = self.get_domain_data(domain)
-        if domain_data.locked:
-            return
-        # normalize by removing excess whitespaces
-        text = self._normalize_text(text)
-        domain_data.texts.append(text)
-        # internally triggers finalization of the set of phrases for a domain when min_domain_samples is reached
-        if len(domain_data.texts) >= self.min_domain_samples:
-            self._finalize_boilerplate(domain)
-
-    def force_finalize_all(self):
-        for domain, data in self.domain_data_map.items():
-            # if initial domain filtering has concluded but texts for more than the min number of samples remains, run the boilerplate detection anyway
-            if not data.locked and data.texts:
-                self._finalize_boilerplate(domain)
-
-    def _extract_common_phrases(self, texts: List[str]) -> List[str]:
-        """Extract phrases that occur across multiple documents."""
-        # Split into sentences
-        all_sentences = []
-        for text in texts:
-            # Simple sentence splitting at punctuation
-            sentences = re.split(r'[.!?]+', text)
-            all_sentences.extend([s.strip() for s in sentences if len(s.strip()) >= self.phrase_min_length])
-        # Count frequencies
-        sentence_counter = Counter(all_sentences)
-        # Keep sentences that appear in more than min_phrase_freq proportion of documents
-        min_count = max(2, int(len(texts) * self.min_phrase_freq))
-        common_sentences = [
-            sentence for sentence, count in sentence_counter.items()
-                if count >= min_count
-                and self.phrase_min_length <= len(sentence) <= self.phrase_max_length
-                and not self._is_only_stopwords(sentence)
-        ]
-        return common_sentences
-
-    def _extract_line_patterns(self, texts: List[str]) -> List[str]:
-        """Extract common line prefixes and suffixes."""
-        all_lines = []
-        for text in texts:
-            lines = text.split('\n')
-            all_lines.extend([line.strip() for line in lines if line.strip()])
-        # Process beginnings and endings of lines
-        beginnings = []
-        endings = []
-        for line in all_lines:
-            # Get first ~30 characters for beginnings
-            if len(line) > 15:
-                prefix = line[:30].strip()
-                if len(prefix) >= self.phrase_min_length:
-                    beginnings.append(prefix)
-            # Get last ~30 characters for endings
-            if len(line) > 15:
-                suffix = line[-30:].strip()
-                if len(suffix) >= self.phrase_min_length:
-                    endings.append(suffix)
-        # Count frequencies
-        beginning_counter = Counter(beginnings)
-        ending_counter = Counter(endings)
-        # Select common patterns
-        min_count = max(2, int(len(texts) * self.min_phrase_freq))
-        common_beginnings = [
-            beginning for beginning, count in beginning_counter.items()
-            if count >= min_count and not self._is_only_stopwords(beginning)
-        ]
-        common_endings = [
-            ending for ending, count in ending_counter.items()
-            if count >= min_count and not self._is_only_stopwords(ending)
-        ]
-        return common_beginnings + common_endings
-
-    def _extract_common_ngrams(self, texts: List[str]) -> List[str]:
-        """Extract common word n-grams appearing across documents."""
-        # Extract and count all 2-6 word n-grams
-        ngram_counter = Counter()
-        for text in texts:
-            words = re.findall(r'\b\w+\b', text.lower())
-            # Generate n-grams of size 2-6
-            for n in range(2, 7):
-                for i in range(len(words) - n + 1):
-                    ngram = ' '.join(words[i:i+n])
-                    if len(ngram) >= self.phrase_min_length:
-                        ngram_counter[ngram] += 1
-        # Keep n-grams that appear across multiple documents
-        min_count = max(2, int(len(texts) * self.min_phrase_freq))
-        common_ngrams = [
-            ngram for ngram, count in ngram_counter.items()
-                if count >= min_count
-                and self.phrase_min_length <= len(ngram) <= self.phrase_max_length
-                and not self._is_only_stopwords(ngram)
-        ]
-        return common_ngrams
-
-    def _is_only_stopwords(self, text: str) -> bool:
-        """Check if text consists only of stopwords."""
-        # Clean and tokenize
-        text = re.sub(r"[^\w\s]", "", text.lower())
-        words = text.split()
-        # Check if all words are stopwords
-        non_stopwords = [w for w in words if w not in self.stopwords]
-        # Valid if at least 30% of words are not stopwords
-        return len(non_stopwords) < (0.3 * len(words))
-
-
-    def _filter_patterns(self, patterns: Set[str]) -> Set[str]:
-        """Filter out poor quality boilerplate patterns."""
-        # First sort by length (descending) to prioritize longer patterns
-        sorted_patterns = sorted(patterns, key=len, reverse=True)
-        # Filter out duplicate information
-        result = []
-        seen_tokens = set()
-        for pattern in sorted_patterns:
-            # Clean up pattern
-            pattern = pattern.strip()
-            tokens = set(pattern.lower().split())
-            # Skip if pattern contains mostly seen tokens
-            if len(tokens.intersection(seen_tokens)) > 0.7 * len(tokens):
-                continue
-            # Skip very common web phrases
-            if pattern.lower() in {'cookie policy', 'terms of service', 'privacy policy',
-                                  'accept all cookies', 'all rights reserved',
-                                  'sign in', 'sign up', 'log in', 'copyright'}:
-                continue
-            # Keep this pattern
-            if len(pattern) >= self.phrase_min_length:
-                result.append(pattern)
-                seen_tokens.update(tokens)
-        return set(result)
-
-
-    def _finalize_boilerplate(self, domain: str):
-        """ Process collected texts to identify boilerplate phrases by domain via the following strategies:
-            1. Sentence-level common phrases
-            2. Line-prefix and line-suffix patterns
-            3. Common n-grams across documents
-        """
-        domain_data = self.get_domain_data(domain)
-        #text_batch = [text for text in domain_data.texts if text != "" and not is_only_stopwords(text, self.stopwords)]
-        text_batch = [text for text in domain_data.texts if text and len(text) > self.MIN_TEXT_LENGTH]
-        if not text_batch:
-            domain_data.no_valid_text = True
-            domain_data.locked = True
-            domain_data.flush_memory()
-            print(termcolor.colored(f" [DOMAIN FILTER] WARNING: domain {domain} has no valid text data for boilerplate detection!", color="yellow"))
-            return
-        # vectorizer = TfidfVectorizer(
-        #     #! fails on some domains that may be only stopwords - their docs even say to rethink using `stopwords="english"`
-        #     stop_words = self.stopwords,
-        #     strip_accents = "unicode",
-        #     #decode_error = "replace",
-        #     ngram_range = self.ngram_range,
-        #     #max_features=self.max_features,
-        #     min_df = self.min_phrase_freq,
-        #     lowercase = True,
-        #     token_pattern=r"(?u)\b[a-zA-Z][a-zA-Z]+\b"
-        # )
-        # try:
-        #     #_ = vectorizer.fit_transform(self.domain_data_map[domain].texts)
-        #     vectorizer = vectorizer.fit(text_batch)
-        # # except ValueError as e:
-        # #     print(f" [DOMAIN FILTER] WARNING: {domain} has no valid text data for boilerplate detection! \nValueError: {e}")
-        # except Exception as e:
-        #     raise e
-        # repeated_phrases = vectorizer.get_feature_names_out()
-        # repeated_phrases = filter_disjoint_boilerplate(repeated_phrases)
-        # domain_data.boilerplate.update(repeated_phrases)
-        # 1. Extract common sentences and phrases
-        sentence_phrases = self._extract_common_phrases(text_batch)
-        # 2. Extract common line prefixes/suffixes
-        line_patterns = self._extract_line_patterns(text_batch)
-        # 3. Extract common word n-grams
-        common_ngrams = self._extract_common_ngrams(text_batch)
-        # Combine all detected patterns
-        all_patterns = set(sentence_phrases + line_patterns + common_ngrams)
-        # Filter out stopword-only or very short patterns
-        filtered_patterns = self._filter_patterns(all_patterns)
-        # Update the domain data
-        domain_data.boilerplate.update(filtered_patterns)
-        domain_data.locked = True
-        #print(f"Domain {domain} locked with {len(repeated_phrases)} phrases.")
-        domain_data.flush_memory()
-        # Print summary if any patterns found
-        #! TEMPORARY - for debugging; remove later
-        if filtered_patterns:
-            print(termcolor.colored(f" [DOMAIN FILTER] Found {len(filtered_patterns)} boilerplate patterns for {domain}", "green"))
 
 
     def filter_boilerplate(self, domain: str, text: str) -> str:
@@ -373,11 +162,6 @@ class DomainBoilerplateFilter:
                     text = text.replace(pattern, marker)
             # Remove markers but keep their spaces
             filtered_text = re.sub(r' [0-9a-f]{32} ', ' ', text)
-            # Efficiently filter text using precompiled regex
-            # pattern = re.compile('|'.join(re.escape(bp) for bp in sorted(domain_data.boilerplate, key=len, reverse=True)), re.IGNORECASE)
-            # filtered_text = pattern.sub(' ', text)
-            # if text != "" and filtered_text == text:
-            #     print(termcolor.colored(f"WARNING '{domain}' filtered text is the same as original text!", color="yellow"))
             # clean up excess whitespace but preserve paragraph structure
             filtered_text = re.sub(r' {2,}', ' ', filtered_text)        # replace multiple spaces with a single space
             filtered_text = re.sub(r'\n\s*\n', '\n\n', filtered_text)   # keep paragraph breaks
@@ -385,6 +169,166 @@ class DomainBoilerplateFilter:
         except Exception as e:
             print(f"Error filtering text for {domain}: {e}")
             return text
+
+    def add_entry_text(self, domain: str, text: str):
+        domain_data = self.get_domain_data(domain)
+        if domain_data.locked:
+            return
+        domain_data.texts.append(text)
+        # internally triggers finalization of the set of phrases for a domain when min_domain_samples is reached
+        if len(domain_data.texts) >= self.min_domain_samples:
+            self._finalize_boilerplate(domain)
+
+    def _finalize_boilerplate(self, domain: str):
+        """ Process collected texts to identify boilerplate phrases by domain via the following strategies:
+            1. Sentence-level common phrases
+            2. Line-prefix and line-suffix patterns
+            3. Common n-grams across documents
+        """
+        domain_data = self.get_domain_data(domain)
+        #text_batch = [text for text in domain_data.texts if text != "" and not is_only_stopwords(text, self.stopwords)]
+        text_batch = [text for text in domain_data.texts if text and len(text) > self.MIN_TEXT_LENGTH]
+        if not text_batch:
+            domain_data.no_valid_text = True
+            domain_data.locked = True
+            domain_data.flush_memory()
+            print(termcolor.colored(f" [DOMAIN FILTER] WARNING: domain {domain} has no valid text data for boilerplate detection!", color="yellow"))
+            return
+        # 1. Extract common sentences and phrases
+        sentence_phrases = self._extract_common_phrases(text_batch)
+        # 2. Extract common line prefixes/suffixes
+        line_patterns = self._extract_line_patterns(text_batch)
+        # 3. Extract common word n-grams
+        common_ngrams = self._extract_common_ngrams(text_batch)
+        # Combine all detected patterns
+        all_patterns = set(sentence_phrases + line_patterns + common_ngrams)
+        # Filter out stopword-only or very short patterns
+        ###filtered_patterns = self._filter_patterns(all_patterns)
+        # Update the domain data
+        domain_data.boilerplate.update(all_patterns) #filtered_patterns)
+        domain_data.locked = True
+        domain_data.flush_memory()
+
+
+
+    def get_domain_data(self, domain: str) -> DomainFilterData:
+        #? NOTE: relies on defaultdict values if domain doesn't yet exist
+        return self.domain_data_map[domain]
+
+    def get_present_domains(self):
+        return list(self.domain_data_map.keys())
+
+    def force_finalize_all(self):
+        for domain, data in self.domain_data_map.items():
+            # if initial domain filtering has concluded but texts for more than the min number of samples remains, run the boilerplate detection anyway
+            if not data.locked and data.texts:
+                self._finalize_boilerplate(domain)
+
+    def _is_mostly_stopwords(self, text: str) -> bool:
+        """ Check if text consists only of stopwords. """
+        # clean and tokenize
+        text = re.sub(r"[^\w\s]", "", text.lower()) # remove punctuation and special characters
+        words = text.split()
+        # check if most words are stopwords
+        non_stopwords = [w for w in words if w not in self.stopwords]
+        # Valid if at least 10% of words are not stopwords
+        return len(non_stopwords) < (0.1 * len(words))
+
+    def _is_common_phrase(self, phrase: str, count: int, min_count: int, test_stopwords = True, test_length = False):
+        flag = count >= min_count
+        if test_stopwords:
+            flag &= not self._is_mostly_stopwords(phrase)
+        if test_length:
+            flag &= self.phrase_min_length <= len(phrase) <= self.phrase_max_length
+        return flag
+
+    def _filter_by_counter(self, texts: List[str], counter: Counter, test_stopwords = True, test_length = False):
+        min_count = max(2, int(len(texts) * self.min_phrase_freq))
+        return [p for p, n in counter.items() if self._is_common_phrase(p, n, min_count, test_stopwords=test_stopwords, test_length=test_length)]
+
+    def _extract_common_phrases(self, texts: List[str]) -> List[str]:
+        """Extract phrases that occur across multiple documents."""
+        # Split into sentences
+        all_sentences = []
+        for text in texts:
+            # Simple sentence splitting at punctuation
+            sentences = re.split(r'[.!?]+', text)
+            all_sentences.extend([s.strip() for s in sentences if len(s.strip()) >= self.phrase_min_length])
+        # Count frequencies
+        sentence_counter = Counter(all_sentences)
+        # Keep sentences that appear in more than min_phrase_freq proportion of documents
+        return self._filter_by_counter(texts, sentence_counter, test_length=True)
+
+
+    def _extract_line_patterns(self, texts: List[str]) -> List[str]:
+        """Extract common line prefixes and suffixes."""
+        all_lines = []
+        for text in texts:
+            lines = text.split('\n')
+            all_lines.extend([line.strip() for line in lines if line.strip()])
+        # Process beginnings and endings of lines
+        beginnings = []
+        endings = []
+        for line in all_lines:
+            # Get first ~30 characters for beginnings
+            if len(line) > 15:
+                prefix = line[:30].strip()
+                if len(prefix) >= self.phrase_min_length:
+                    beginnings.append(prefix)
+            # Get last ~30 characters for endings
+            if len(line) > 15:
+                suffix = line[-30:].strip()
+                if len(suffix) >= self.phrase_min_length:
+                    endings.append(suffix)
+        # Count frequencies
+        beginning_counter = Counter(beginnings)
+        ending_counter = Counter(endings)
+        # Select common patterns
+        common_beginnings = self._filter_by_counter(texts, beginning_counter)
+        common_endings = self._filter_by_counter(texts, ending_counter)
+        return common_beginnings + common_endings
+
+    def _extract_common_ngrams(self, texts: List[str]) -> List[str]:
+        """ Extract common word n-grams appearing across documents. """
+        # Extract and count all 2-6 word n-grams
+        ngram_counter = Counter()
+        for text in texts:
+            words = re.findall(r'\b\w+\b', text.lower())
+            # Generate n-grams of size 2-6
+            for n in range(self.phrase_min_length, self.phrase_max_length):
+                for i in range(len(words) - n + 1):
+                    ngram = ' '.join(words[i:i+n])
+                    if len(ngram) >= self.phrase_min_length:
+                        ngram_counter[ngram] += 1
+        # Keep n-grams that appear across multiple documents
+        return self._filter_by_counter(texts, ngram_counter, test_length=True)
+
+
+    # def _filter_patterns(self, patterns: Set[str]) -> Set[str]:
+    #     """ Filter out poor quality boilerplate patterns. """
+    #     # First sort by length (descending) to prioritize longer patterns
+    #     sorted_patterns = sorted(patterns, key=len, reverse=True)
+    #     # Filter out duplicate information
+    #     result = []
+    #     seen_tokens = set()
+    #     for pattern in sorted_patterns:
+    #         # Clean up pattern
+    #         pattern = pattern.strip()
+    #         tokens = set(pattern.lower().split())
+    #         # Skip if pattern contains mostly seen tokens
+    #         if len(tokens.intersection(seen_tokens)) > 0.75 * len(tokens):
+    #             continue
+    #         # Skip very common web phrases
+    #         if pattern.lower() in {'cookie policy', 'terms of service', 'privacy policy',
+    #                               'accept all cookies', 'all rights reserved',
+    #                               'sign in', 'sign up', 'log in', 'copyright'}:
+    #             continue
+    #         # Keep this pattern
+    #         if len(pattern) >= self.phrase_min_length:
+    #             result.append(pattern)
+    #             seen_tokens.update(tokens)
+    #     return set(result)
+
 
     def save_boilerplate_map(self, json_path: str, override: bool = False):
         if override or not os.path.exists(json_path):

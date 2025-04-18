@@ -1,4 +1,4 @@
-import os #, sys
+import os, sys
 import argparse
 import yaml
 from dataclasses import dataclass, field
@@ -15,7 +15,7 @@ SUPPORTED_MODEL_BACKBONES = [
     "all-MiniLM-L12-v2",    # "sentence-transformers/all-MiniLM-L12-v2"
     "all-distilroberta-v1",
     "all-mpnet-base-v2",
-    "allenai/scibert_scivocab_uncased",
+    #"allenai/scibert_scivocab_uncased",
     "intfloat/e5-base-v2",
     "distilroberta-base"
 ]
@@ -100,6 +100,8 @@ class ModelingSettings:
             from onetab_autosorter.parsers import NetscapeBookmarkParser
             folder_tree = NetscapeBookmarkParser.extract_folder_structure_tree(self.seed_kws_from_html)
             self.seed_kws.extend(folder_tree.extract_as_keywords())
+            # print(f"Extracted seed keywords from HTML: {self.seed_kws}")
+            # sys.exit(0)
 
 
 @dataclass
@@ -109,7 +111,7 @@ class Config:
     deduplicate: bool = True
     scraper_type: str = "limited"  # choose from SCRAPER_OPTIONS
     chunk_size: int = 30  # Number of entries to process in each chunk
-    max_tokens: int = 400 # max number of tokens to retain in each entry
+    max_tokens: int = 200 # max number of tokens to retain in each entry
     filter_config_path: Optional[str] = DEFAULT_YAML_PATH # path to the YAML file of ordered regex filter patterns)
     compiled_filters: list = None  # filled during post-init
     checkpoint_cfg: CheckpointSettings = field(default_factory=CheckpointSettings)

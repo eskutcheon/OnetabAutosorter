@@ -93,8 +93,8 @@ CODE_PATTERNS = [
     # spacing around Python import keywords to deal with specific problems I kept seeing
     re.compile(r'\b(import|from)\b(?=\w)', re.IGNORECASE),  # "import" not followed by space
     re.compile(r'(?<=\w)(import|from|as)\b', re.IGNORECASE),  # "import" not preceded by space
-    # TODO: remove later after refining filtering strategy
-    # common Python syntax spacing issues
-    re.compile(r'(?<=\w)(def|class|for|in|if|else|elif|while|return|with|try|except|finally)\b', re.IGNORECASE),
-    re.compile(r'\b(def|class|for|in|if|else|elif|while|return|with|try|except|finally)(?=\w)', re.IGNORECASE)
+    # # TODO: remove later after refining filtering strategy
+    # # common Python syntax spacing issues
+    # re.compile(r'(?<=\w)(def|class|for|in|if|else|elif|while|return|with|try|except|finally)\b', re.IGNORECASE),
+    # re.compile(r'\b(def|class|for|in|if|else|elif|while|return|with|try|except|finally)(?=\w)', re.IGNORECASE)
 ]
