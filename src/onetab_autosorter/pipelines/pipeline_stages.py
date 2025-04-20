@@ -3,12 +3,13 @@ import os
     #~ use typing.Protocol: https://stackoverflow.com/questions/54668000/type-hint-for-an-instance-of-a-non-specific-dataclass
 from dataclasses import dataclass, field, asdict
 from re import Pattern
-from typing import Optional, Dict, List, Literal, Callable, Union, Any, Tuple, Generator, Iterable
+from typing import Optional, Dict, List, Literal, Callable, Union, Any, Tuple, Generator
 # local imports
+# TODO: need to make this a more intelligent config managed by `Pipeline` so that we can start from any stage by loading data
 from onetab_autosorter.config.config import StageCacheSettings
 # TODO: replace with imports from new types file later - only used for type annotation at the moment
 from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
-from onetab_autosorter.utils.io_utils import compute_hash, get_hashed_path_from_string, save_json, load_json, get_hashed_path_from_hash
+from onetab_autosorter.utils.utils import compute_hash, get_hashed_path_from_string, save_json, load_json, get_hashed_path_from_hash
 
 
 @dataclass
@@ -144,6 +145,7 @@ class Pipeline:
         self.data_only_hash = None
         self.cache_hash = None
 
+    #& UNTESTED
     def __iter__(self, initial_input: Any) -> Generator[Any, None, None]:
         """ iterable to generate data in each stage while holding off on the next stage until requested """
         data = self.load_initial_data(initial_input)  # load the initial data from the loader stage
@@ -244,9 +246,8 @@ create:
 
 
 class ParsingStage(PipelineStage):
-    def __init__(self, file_path: str, deduplicate: bool, stage_settings: StageCacheSettings):
+    def __init__(self, file_path: str, stage_settings: StageCacheSettings):
         self.file_path = file_path
-        self.deduplicate = deduplicate
         self.parser = None
         super().__init__(
             name=stage_settings.stage_name,
@@ -264,7 +265,7 @@ class ParsingStage(PipelineStage):
 
     def process_data(self, data: Any, *args, **kwargs) -> List[Dict[str, Any]]:
         from onetab_autosorter.pipelines.staging_utils import run_parser
-        return run_parser(self.parser, self.file_path, self.deduplicate)
+        return run_parser(self.parser, self.file_path)
 
 
 class WebScrapingStage(PipelineStage):
@@ -295,10 +296,6 @@ class WebScrapingStage(PipelineStage):
 
 
 
-
-
-#!!! RETHINK ORDER - old order expected domain filter initialization and fitting before bulk webscraping
-    # changing a line in DomainBoilerplateFilter to query the new keys for now - after update, a fetcher function wouldn't be needed
 class DomainFilterFittingStage(PipelineStage):
     def __init__(self, stage_settings: StageCacheSettings, **kwargs):
         self.domain_filter = None
@@ -407,3 +404,121 @@ class KeywordExtractionStage(PipelineStage):
         return [], {"keyword_model": self.keyword_model}
 
 
+
+class EmbeddingStage(PipelineStage):
+    """ Generate embeddings for bookmark entries' data to cluster in the next stage """
+    def __init__(
+        self,
+        stage_settings: StageCacheSettings,
+        embedding_model: str = "all-MiniLM-L6-v2",
+        include_features: List[str] = None,
+        batch_size: int = 32,
+        normalize_numeric: bool = True
+    ):
+        self.embedding_model = embedding_model
+        self.include_features = include_features or ["keyword", "path", "subdomain", "date"]
+        self.batch_size = batch_size
+        self.normalize_numeric = normalize_numeric
+        self.results = None
+        super().__init__(
+            name=stage_settings.stage_name,
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
+        )
+
+    def process_data(self, data: List[Dict[str, Any]], keyword_model = None, *args, **kwargs) -> Dict[str, Any]:
+        """ Generate embeddings using the EmbeddedDataFrameBuilder. """
+        from onetab_autosorter.models.embeddings import EmbeddedDataFrameBuilder
+        # Get the keyword field name from the keyword model if available
+        keyword_field = "keywords"
+        if keyword_model:
+            keyword_field = getattr(keyword_model, "output_field", "keywords")
+        # Use the factory method to generate embeddings in one step
+        self.results = EmbeddedDataFrameBuilder.dataframe_factory(
+            entries=data,
+            embedding_model=self.embedding_model,
+            keyword_field=keyword_field,
+            include_features=self.include_features,
+            batch_size=self.batch_size,
+            normalize_numeric=self.normalize_numeric,
+            include_embeddings=True,
+            verbose=True
+        )
+        return asdict(self.results) # dictionary with dataframe, embeddings (ndarray), and dictionary of feature info
+
+    def create_stage_objects(self, data, *args, **kwargs):
+        pass
+
+    def get_propagation_objects(self) -> Tuple[List, Dict]:
+        """ Pass the embedding results to the next stage. """
+        if not self.results:
+            return [], {}
+        return [], {"embedding_results": asdict(self.results)}
+
+
+
+class ClusteringStage(PipelineStage):
+    """ Cluster bookmark entries using embeddings """
+    def __init__(
+        self,
+        stage_settings: StageCacheSettings,
+        algorithm: str = "hdbscan",
+        min_cluster_size: int = 5,
+        add_keyword_labels: bool = True,
+        add_zero_shot_labels: bool = False,
+        candidate_labels: List[str] = None
+    ):
+        self.algorithm = algorithm
+        self.min_cluster_size = min_cluster_size
+        self.add_keyword_labels = add_keyword_labels
+        self.add_zero_shot_labels = add_zero_shot_labels
+        self.candidate_labels = candidate_labels
+        self.clustering_results = None
+        super().__init__(
+            name=stage_settings.stage_name,
+            cache_dir=stage_settings.cache_dir,
+            reuse_cache=stage_settings.load_cache,
+            save_cache=stage_settings.save_cache,
+            hash_based_on_data=stage_settings.only_data_dependent
+        )
+
+    def process_data(self, data: Any, embedding_results = None, *args, **kwargs) -> Dict[str, Any]:
+        """ Apply clustering to embeddings """
+        from onetab_autosorter.models.clustering import ClusteringBuilder
+        if not embedding_results:
+            raise ValueError("No embedding results provided to clustering stage")
+        df = embedding_results["df"]
+        embeddings = embedding_results["embeddings"]
+        if embeddings is None:
+            raise ValueError("No embeddings found in embedding results")
+        # Use the factory method to perform clustering in one step
+        self.clustering_results = ClusteringBuilder.cluster_factory(
+            df=df,
+            embeddings=embeddings,
+            algorithm=self.algorithm,
+            min_cluster_size=self.min_cluster_size,
+            add_keyword_labels=self.add_keyword_labels,
+            add_zero_shot_labels=self.add_zero_shot_labels,
+            candidate_labels=self.candidate_labels,
+            verbose=True
+        )
+        cluster_results = self.clustering_results
+        return {
+            "df": cluster_results.df,
+            "clusters": cluster_results.clusters,
+            # "cluster_counts": cluster_results.cluster_counts,
+            # "zero_shot_counts": cluster_results.zero_shot_counts,
+            # "outliers": cluster_results.outliers,
+            # "model": cluster_results.model
+        }
+
+    def create_stage_objects(self, data, *args, **kwargs):
+        pass
+
+    def get_propagation_objects(self) -> Tuple[List, Dict]:
+        """ Pass clustering results to the next stage (if any) """
+        if not self.clustering_results:
+            return [], {}
+        return [], {"clustering_results": {k: v for k, v in asdict(self.clustering_results).items() if k in ["df", "clusters"]}}

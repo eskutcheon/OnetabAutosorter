@@ -1,4 +1,6 @@
 import os
+import json
+import hashlib
 import re
 from thefuzz import fuzz
 from itertools import permutations
@@ -43,11 +45,8 @@ def get_keywords_from_paths(folder_list: List[str], max_depth: int = 4) -> Set[s
     #! FIXME: still needs some work on the underlying logic since some expected folders seem to be missing and it's not tossing out `root`
     # generate the regex pattern for all permutations of ignored words
     ignored_regex = generate_ignored_regex(DEFAULT_IGNORE_FOLDER_NAMES)
-    #print("ignored regex pattern: ", ignored_regex)
-    #print("number of ignored regex patterns: ", len(ignored_regex.split("|")))
     # helper function to extract the final folder name and filter out ignored words
     def filter_name(folder_name: str) -> str:
-        #print("initial folder path: ", folder_name)
         subfolders = folder_name.split("/")[:max_depth]
         filtered = subfolders[-1].strip().lower()
         # use regex to remove ignored words and their combinations
@@ -57,6 +56,118 @@ def get_keywords_from_paths(folder_list: List[str], max_depth: int = 4) -> Set[s
     folder_set.discard("")      # remove empty strings if present
     # TODO: should filter stopwords here too since they may be all that's left after filtering
     return folder_set
+
+
+
+def prompt_user_to_edit():
+    import threading
+    import time
+    DEFAULT_TIMEOUT = 15 # seconds
+    prompt = "Would you like to remove any of these labels?"
+    dynamic_prompt = f"{prompt} [{DEFAULT_TIMEOUT}s remaining]"
+    print(f"{prompt} (Will automatically keep all labels after {DEFAULT_TIMEOUT} seconds)")
+    # variables to store user's response and action (using lists to allow access from the thread)
+    user_wants_to_edit = [False]
+    user_responded = [False]
+    # local function for the thread to run
+    def get_user_confirmation():
+        answers = {'y': True, 'yes': True, 'n': False, 'no': False, '': False}
+        try:
+            # ! WARNING: walrus operator  only works in Python 3.8+
+            while (response := input(f"{dynamic_prompt} [Y/n] : ").strip().lower()) not in answers:
+                print("\tInvalid input. Please enter 'y' or 'n' (not case sensitive).")
+            user_wants_to_edit[0] = answers[response]
+            user_responded[0] = True
+        except KeyboardInterrupt:
+            print("\nInterrupted. Keeping all labels.")
+            user_responded[0] = True
+    # start input thread
+    input_thread = threading.Thread(target=get_user_confirmation)
+    input_thread.daemon = True
+    input_thread.start()
+    # wait for response with timeout
+    start_time = time.time()
+    # only start showing countdown after a small delay to avoid UI confusion
+    time.sleep(0.5)
+    while input_thread.is_alive() and (time.time() - start_time) < DEFAULT_TIMEOUT:
+        if not user_responded[0]:
+            remaining = int(DEFAULT_TIMEOUT - (time.time() - start_time))
+            #print(f"\rWaiting for response... {remaining} seconds remaining", end="", flush=True)
+            dynamic_prompt = f"{prompt} [{remaining}s remaining]"
+            time.sleep(0.1)  # More responsive countdown
+    # clear the countdown line
+    print()
+    # check if the thread timed out
+    if input_thread.is_alive() and not user_responded[0]:
+        print("\nTime's up! Keeping all labels.")
+        return False
+    return user_wants_to_edit[0]
+
+
+
+def prompt_to_drop_labels(all_labels: List[str], req_confirmation: bool = True) -> bool:
+    sorted_labels = sorted(all_labels)
+    # first ask if the user wants to edit at all with timeout
+    print("\nFound the following labels from the folder structure: \n", ", ".join(sorted_labels), end="\n\n")
+    if req_confirmation and not prompt_user_to_edit():
+        print("Keeping all labels...")
+        return sorted_labels
+    final_labels = []
+    # display the extracted labels with indices
+    print("\n===== EXTRACTED SEED LABELS =====")
+    for i, label in enumerate(sorted_labels):
+        print(f"[{i}] {label}")
+    # interactive prompt to remove labels
+    print("\nYou can remove unwanted labels by entering:")
+    print(" - Index numbers (e.g., '0 3 5' to remove labels at positions 0, 3, and 5)")
+    print(" - Exact label text (e.g., 'Python JavaScript' to remove those labels)")
+    print(" - A mix of both (e.g., '0 JavaScript 5')")
+    print(" - Or just press Enter to keep all labels")
+    print("\nNote: Matching is case-insensitive")
+    try:
+        user_input = input("\nLabels to remove (or press Enter to keep all): ").strip()
+        if not user_input:
+            print("Confirmed: Keeping all labels...")
+            final_labels = sorted_labels
+            return
+        # track labels to remove (by index and by name)
+        to_remove = set()
+        # split input by whitespace
+        tokens = user_input.split()
+        # process each token
+        for token in tokens:
+            # try to interpret as an index
+            try:
+                idx = int(token)
+                if 0 <= idx < len(sorted_labels):
+                    to_remove.add(idx)
+                else:
+                    print(f"WARNING: Index {idx} is out of range (0-{len(sorted_labels)-1}), ignoring.")
+            except ValueError:
+                # interpret as a label name (case-insensitive)
+                found = False
+                for i, label in enumerate(sorted_labels):
+                    if token.lower() == label.lower():
+                        to_remove.add(i)
+                        found = True
+                if not found:
+                    print(f"WARNING: No exact match found for '{token}', ignoring.")
+        # create a new list while excluding the removed indices
+        filtered_labels = [label for i, label in enumerate(sorted_labels) if i not in to_remove]
+        # provide feedback on what was removed
+        removed_labels = [label for i, label in enumerate(sorted_labels) if i in to_remove]
+        if removed_labels:
+            print(f"\nRemoved {len(removed_labels)} labels: \n\t{', '.join(removed_labels)}")
+        # update seed labels
+        final_labels = filtered_labels
+        print(f"Keeping {len(final_labels)} candidate labels for keyword extraction or zero-shot labeling.")
+    except KeyboardInterrupt:
+        print("\nInterrupted. Keeping all labels.")
+        final_labels = sorted_labels
+    except Exception as e:
+        print(f"\nError during label selection: {e}. Keeping all labels.")
+        final_labels = sorted_labels
+    return final_labels
 
 
 class FolderNode:
@@ -172,3 +283,42 @@ def preprocess_html_text(raw: Union[str, List[str]]) -> str:
     lines = _remove_near_duplicates(lines)
     text = "\n".join(lines) # _clean_text(lines)
     return text
+
+
+
+
+class PythonSetEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, set):
+            return list(obj)
+        return super().default(obj)
+
+
+def compute_hash(value: str) -> str:
+    return hashlib.md5(value.encode("utf-8")).hexdigest()
+
+# def cache_path(base_dir: str, name: str, ext="json"):
+#     return os.path.join(base_dir, f"{name}.{ext}")
+
+
+def get_hashed_path_from_string(input_path: str, stage_name: str, cache_dir: str) -> str:
+    hash_str = compute_hash(input_path)
+    return get_hashed_path_from_hash(hash_str, stage_name, cache_dir)
+
+def get_hashed_path_from_hash(hash_str: str, stage_name: str, cache_dir: str) -> str:
+    file_prefix = "" if not stage_name else f"{stage_name}_"
+    return os.path.join(cache_dir, f"{file_prefix}{hash_str}.json")
+
+
+def load_json(file_path: str) -> Any:
+    #? NOTE: might just import and use this within the JSON parser I made for no reason
+    if not file_path or not os.path.exists(file_path):
+        raise FileNotFoundError(f"File not found: {file_path}")
+    with open(file_path, "r", encoding="utf-8") as fptr:
+        return json.load(fptr)
+
+
+def save_json(file_path: str, data: Dict):
+    os.makedirs(os.path.dirname(file_path), exist_ok=True)
+    with open(file_path, "w", encoding="utf-8") as fptr:
+        json.dump(data, fptr, indent=2, cls=PythonSetEncoder)  # Use the custom encoder for sets

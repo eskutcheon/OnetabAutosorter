@@ -1,18 +1,17 @@
 # -*- coding: utf-8 -*-
-
-from abc import ABC, abstractmethod
 from collections import Counter
 from functools import wraps
-from dataclasses import dataclass, field
+from tqdm.auto import tqdm
 from typing import Optional, Dict, List, Literal, Callable, Union, Any
 import numpy as np
 import torch
 import polars as pl
-# necessary for HDBSCAN clustering since we need a probabilities vector and an approximate_predict method for fuzzy clustering
-from hdbscan import HDBSCAN
-from sklearn.cluster import KMeans
+import torch
+from torch.utils.data import DataLoader
 # from sklearn.metrics.pairwise import cosine_distances
 from transformers import pipeline
+# local imports
+from onetab_autosorter.models.cluster_utils import BaseClusterer, KMeansClusterer, HDBSCANClusterer, ClusteringResults
 
 
 # 67 options for candidate labels for testing zero-shot classification
@@ -28,74 +27,6 @@ DEFAULT_ZERO_SHOT_LABELS = [
     'current events', 'consumerism', 'history', 'fashion', 'articles', 'entertainment', 'comics',
 ]
 
-
-
-class BaseClusterer(ABC):
-    """ common base class for different clustering algorithms including those I might try in the future """
-    @abstractmethod
-    def fit_predict(self, X: np.ndarray) -> np.ndarray:
-        pass
-
-    @abstractmethod
-    def confidence_scores(self, X: np.ndarray) -> np.ndarray:
-        pass
-
-
-@dataclass
-class HDBSCANClusterer(BaseClusterer):
-    min_cluster_size: int = 5
-    min_samples: int = None
-    metric: str = "arccos" #cosine_distances #"cosine"
-    model: HDBSCAN = field(default=None, init=False)
-
-    def fit_predict(self, X: np.ndarray) -> np.ndarray:
-        if self.min_samples is None:
-            self.min_samples = self.min_cluster_size // 2
-        self.model = HDBSCAN(
-            min_cluster_size=self.min_cluster_size,
-            min_samples=self.min_samples,
-            metric=self.metric,
-            prediction_data=True,
-        )
-        labels = self.model.fit_predict(X)
-        return labels
-
-    def confidence_scores(self, X: np.ndarray) -> np.ndarray:
-        return self.model.probabilities_
-
-
-@dataclass
-class KMeansClusterer(BaseClusterer):
-    n_clusters: int = 10
-    random_state: int = 42
-    model: KMeans = field(default=None, init=False)
-
-    def fit_predict(self, X: np.ndarray) -> np.ndarray:
-        self.model = KMeans(n_clusters=self.n_clusters, random_state=self.random_state, n_init="auto")
-        return self.model.fit_predict(X)
-
-    def confidence_scores(self, X: np.ndarray) -> np.ndarray:
-        """ use the inverse of distances to cluster centers as a proxy for confidence scores for KMeans """
-        centers = self.model.cluster_centers_
-        labels = self.model.labels_
-        distances = np.array([np.linalg.norm(x - centers[label]) for x, label in zip(X, labels)])
-        # convert distances to confidence scores
-        max_dist = np.max(distances) + 1e-6  # TOL to avoid DivisionByZero error
-        return 1.0 - (distances / max_dist)
-
-
-
-
-
-@dataclass
-class ClusteringResults:
-    """ container for clustering outputs to maintain clean interfaces """
-    df: pl.DataFrame
-    clusters: Dict[int, List[int]] = field(default_factory=dict)
-    cluster_counts: Dict[int, int] = field(default_factory=dict)
-    zero_shot_counts: Dict[str, int] = field(default_factory=dict)
-    outliers: List[int] = field(default_factory=list)
-    model: Any = None # could be HDBSCAN, KMeans, etc.
 
 
 def clustering_step(step_name: str):
@@ -123,8 +54,9 @@ class ClusteringBuilder:
         3. (Optionally) adds labeling steps
     """
 
-    def __init__(self, algorithm: str = "hdbscan", verbose: bool = False):
+    def __init__(self, algorithm: str = "hdbscan", batch_size: int = 16, verbose: bool = False):
         self.algorithm = algorithm
+        self.batch_size = batch_size
         self.verbose = verbose
         self.df: Optional[pl.DataFrame] = None
         self.embeddings: Optional[np.ndarray] = None
@@ -233,31 +165,46 @@ class ClusteringBuilder:
         """
         if not self.results:
             raise RuntimeError("Must run fit() before labeling.")
+        from onetab_autosorter.models.cluster_utils import ClusterTextDataset
         device = 0 if torch.cuda.is_available() else -1
+        # TODO: add more arguments here to make full use of the pipeline structure
         classifier = pipeline("zero-shot-classification", model=model_name, device=device)
-        # TODO: instantiate PolarsDataset (subclass of TensorDataset) with df.to_torch(return_type="dataset") and create an iterator with the pipeline like
-            # for data in tqdm(classifier(polars_dataset, candidate_labels, batch_size=32)):
-        # TODO: to accomplish the above, I need to iron out the feature labels and generation of new dataframes from only pertinent columns
-        #polars_dataset = self.results.df.to_torch(return_type="dataset", label = [], features)
-        cluster_labels: Dict[int, str] = {}
-        for cid, indices in self.results.clusters.items():
-            if not indices:
-                continue
-            # gather cluster keywords, join them, and run classifier
-            texts = [kws for i in indices if (kws := self.df["keywords_text"][i]) and i < len(self.df)]
-            combined_text = " ".join(texts)
+        # prepare a mapping of cluster_id -> combined keywords to instantiate a Pytorch dataset
+        cluster_texts = {
+            cid: " ".join(self.df["keywords_text"][i] for i in idxs)
+            for cid, idxs in self.results.clusters.items()
+        }
+        text_dataset = ClusterTextDataset(cluster_texts)
+        loader = DataLoader(text_dataset, batch_size=self.batch_size, shuffle=False)
+        label_map: Dict[int, List[str]] = {}
+        for batch in tqdm(loader, desc="Zero-shot classification progress", unit="batch"):
+            ids, texts = batch
             with torch.no_grad():
-                result = classifier(combined_text, candidate_labels)
-            best_label = result["labels"][0] if result["labels"] else "Other"
-            cluster_labels[cid] = best_label
-        labeled_df = self.results.df.with_columns([
-            pl.col("cluster_id").map_elements(
-                lambda x: cluster_labels.get(x, "Other") if x >= 0 else "Noise", return_dtype=pl.String
-            ).alias("zero_shot_label")
-        ])
+                # convert texts (returned as tuple of strings) to list of strings for the classifier
+                results: List[Dict[str, List[Union[str, int, float]]]] = classifier(list(texts), candidate_labels, batch_size=self.batch_size)
+            for cid, res in zip(ids, results):
+                if cid not in label_map:
+                    label_map[cid] = []
+                best_label = res["labels"][0] if res["labels"] else "Other"
+                label_map[cid].append(best_label)
+        # build a new Polars DF and convert to long format (explode) to get each (cid, label) on its own row
+        mode_df = pl.DataFrame({
+            # add labels into DataFrame based on cluster IDs
+            "cluster_id": list(label_map.keys()), "labels": list(label_map.values())
+            }).explode("labels").group_by("cluster_id").agg(
+            pl.col("labels").mode().first().alias("zero_shot_label") # pick the most frequent label for a given ID
+        )
+        df2 = self.results.df.join(mode_df, on="cluster_id", how="left")
+        df2.glimpse()
+        df2 = df2.with_columns(
+            pl.when(pl.col("cluster_id") < 0)
+              .then(pl.lit("Noise"))
+              .otherwise(pl.col("zero_shot_label").fill_null("Other"))
+              .alias("zero_shot_label")
+        )
         # save zero-shot labels and counts to results.zero_shot_counts
-        self.results.zero_shot_counts = labeled_df.group_by("zero_shot_label").agg(pl.col("url").count()).to_dict()
-        self.results.df = labeled_df
+        self.results.zero_shot_counts = df2.group_by("zero_shot_label").agg(pl.count("url")).to_dict()
+        self.results.df = df2
         return self
 
     #~ may make these class properties later, but for now it would break certain logic relying on it like using `if not self.results`
@@ -340,6 +287,7 @@ def inject_generated_labels(df: pl.DataFrame, label_map: Dict[int, str], label_c
     return df.with_columns([pl.Series(label_col, label_series)])
 
 
+# TODO: use same treatment as in the ClusteringBuilder class in `add_zero_shot_labels` - abstract to common base functionality later
 def generate_cluster_labels_zero_shot(
     df: pl.DataFrame,
     candidate_labels: List[str],

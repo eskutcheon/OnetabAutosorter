@@ -4,12 +4,11 @@ from collections import defaultdict
 from termcolor import colored
 from typing import Optional, Dict, List, Literal, Callable, Union, Any
 # local imports
-from onetab_autosorter.config.config import Config, CheckpointSettings #, get_cfg_from_cli
-from onetab_autosorter.utils.utils import detect_bookmark_format, deduplicate_entries
-from onetab_autosorter.utils.io_utils import get_hashed_path_from_string, load_json, save_json
+from onetab_autosorter.config.config import Config, CheckpointSettings
+from onetab_autosorter.utils.utils import detect_bookmark_format, deduplicate_entries, get_hashed_path_from_string, load_json, save_json
 # TODO: replace with custom type hints later - not needed as an object here
 from onetab_autosorter.parsers import BaseParser
-from onetab_autosorter.keyword_extraction import KeyBertKeywordModel, BERTopicKeywordModel
+from onetab_autosorter.models.keyword_extraction import KeyBertKeywordModel, BERTopicKeywordModel
 from onetab_autosorter.preprocessors.handler import TextPreprocessingHandler, EnhancedTextPreprocessingHandler
 #from onetab_autosorter.preprocessors.domain_filter import DomainBoilerplateFilter
 from onetab_autosorter.preprocessors.text_filters import TextCleaningFilter, EnhancedTextCleaningFilter

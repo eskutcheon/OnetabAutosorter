@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 import json
-import hashlib
+# import hashlib
 from dataclasses import dataclass, field
 from functools import wraps
 from typing import Dict, List, Set, Callable, Union, Optional, Any
@@ -11,6 +11,21 @@ from sentence_transformers import SentenceTransformer
 
 DEFAULT_FEATURE_CATEGORIES = ["keyword", "path", "subdomain", "date"] #, "group"]
 
+# TODO: move later
+from torch.utils.data import Dataset, DataLoader
+
+class TextPairDataset(Dataset):
+    """ simple Dataset over two parallel lists of strings """
+    def __init__(self, metas: List[str], contents: List[str]):
+        assert len(metas) == len(contents)
+        self.metas = metas
+        self.contents = contents
+
+    def __len__(self):
+        return len(self.metas)
+
+    def __getitem__(self, idx):
+        return self.metas[idx], self.contents[idx]
 
 
 @dataclass
@@ -140,104 +155,58 @@ class EmbeddedDataFrameBuilder:
                 print(f"Error processing date feature: {e}")
             return df
 
-    # @feature_category("group")
-    # def add_group_features(self, df: pl.DataFrame) -> pl.DataFrame:
-    #     if "group_ids" not in df.columns:
-    #         return df
-    #     self.results.feature_info["group_ids"] = "Comma-separated group IDs representing bookmark sessions"
-    #     return df
+
+    def _project_embeddings(self, embeddings: np.ndarray, dim: int) -> np.ndarray:
+        """ Project embeddings to reduce dimensionality """
+        from sklearn.random_projection import GaussianRandomProjection
+        projector = GaussianRandomProjection(n_components=dim)
+        return projector.fit_transform(embeddings)
 
     # TODO: this whole function needs a TON of work - just starting by splitting it up into smaller functions first
     def generate_hybrid_embeddings(self, df: pl.DataFrame) -> Optional[np.ndarray]:
-        """ hybrid approach to a tabular embedding that integrates keywords, partial content, domain, etc """
+        """ hybrid approach to a tabular embedding - batch-encode metadata (title, domain, keywords) and content
+            separately via PolarsDataset + DataLoader, then project & combine with prescribed weighting.
+        """
         if not self.include_embeddings:
             return None
-        from sklearn.random_projection import GaussianRandomProjection
-        
-        def transform_embedding(data: str, projector: GaussianRandomProjection, needs_fitting: bool = False) -> np.ndarray:
-            # TODO: updated approach should probably encode it all at once for better efficiency
-            embedding = self.model.encode([data])[0]
-            if needs_fitting:
-                return projector.fit_transform(embedding.reshape(1, -1))[0]
-            else:
-                return projector.transform(embedding.reshape(1, -1))[0]
-        
-        def get_fallback_embedding(dim):
-            return np.zeros(dim, dtype=np.float32)
-        
-        # get embedding dimension from the pre-trained model
-        embedding_dim = self.model.get_sentence_embedding_dimension()
-        # save dataframe columns as local list variables
-        keyword_dicts = df["raw_keywords"].to_list()
-        titles = df["title"].to_list()
-        contents = df["contents"].to_list() if "contents" in df.columns else ["" for _ in keyword_dicts]
-        domains = df["domain"].to_list()
-        # creating random projection object to reduce dimensionality
-            # ~may want to change to KPCA with a kernel fit on each feature later
-        content_dim = embedding_dim // 3
-        title_dim = embedding_dim // 6
-        content_projector = GaussianRandomProjection(n_components=content_dim)
-        title_projector = GaussianRandomProjection(n_components=title_dim)
-        all_embeddings = []
-        for i in range(len(keyword_dicts)):
-            try:
-                keywords_dict = json.loads(keyword_dicts[i])
-                # create weighted keyword embedding with full dimensionality preserved
-                if keywords_dict:
-                    keywords = list(keywords_dict.keys())
-                    weights = np.array(list(keywords_dict.values()), dtype=float)
-                    batch_emb = self.model.encode(keywords, show_progress_bar=(self.verbose and i == 0))
-                    weights_sum = weights.sum()
-                    if weights_sum > 0.0:
-                        weights /= weights_sum
-                    keyword_embedding = np.average(batch_emb, axis=0, weights=weights)
-                else: # fallback is empty zeros for all embeddings
-                    keyword_embedding = get_fallback_embedding(embedding_dim)
-                # title embedding (projected to reduced dimensions)
-                title_embedding = get_fallback_embedding(title_dim)
-                if titles[i] and len(titles[i]) > 3:
-                    title_embedding = transform_embedding(titles[i], title_projector, needs_fitting=(i == 0))
-                # content embedding (projected to reduced dimensions)
-                content_embedding = get_fallback_embedding(content_dim)
-                if contents[i] and len(contents[i]) > 50:
-                    #! FIXME: changed my mind on this though Copilot recommended it
-                    sentences = contents[i].split(".") # TODO: include a more robust sentence tokenizer (still based on punctuation) with NLTK
-                    if len(sentences) >= 3:
-                        # extract first sentence and middle sentence
-                        key_content = sentences[0] + ". " + sentences[len(sentences)//2]
-                    else:
-                        key_content = sentences[0] if sentences else ""
-                    if key_content:
-                        content_embedding = transform_embedding(key_content, content_projector, needs_fitting=(i == 0))
-                # minimal domain hashing for additional context
-                domain_context = get_fallback_embedding(self.DOMAIN_HASH_LENGTH)
-                # print("testing if error is in domains[i]")
-                if domains[i]:
-                    domain_hash = hashlib.md5(domains[i].encode()).digest()[:self.DOMAIN_HASH_LENGTH]
-                    domain_context = np.array([b/255.0 for b in domain_hash])
-                # weight embeddings by importance then concatenate
-                # TODO: add adjustment by how many entries actually have these features
-                keyword_embedding *= 1.0
-                title_embedding *= 0.6
-                content_embedding *= 0.4
-                domain_context  *= 0.1
-                combined = np.concatenate([keyword_embedding, title_embedding, content_embedding, domain_context])
-                all_embeddings.append(combined)
-            except Exception as ex:
-                if self.verbose:
-                    print(f"Error building embedding for index {i}: {ex}")
-                fallback_dims = embedding_dim + content_dim + 8
-                all_embeddings.append(get_fallback_embedding(fallback_dims))
-            # optional progress message
-            #~ should be able to replace this with an actual progress bar after changing things up to embed all data at once with self.model
-            if self.verbose and i % 100 == 0 and i > 0:
-                print(f"  Processed {i}/{len(keyword_dicts)} entries.")
-        final_dim = embedding_dim + content_dim + self.DOMAIN_HASH_LENGTH
+        if self.verbose:
+            print(f"Generating batched embeddings via PolarsDataset and DataLoader")
+        CONTENT_MAX_TOKENS = 100 # max number of tokens to use for content embedding
+        # build `meta_text` and truncated `content_text` columns
+        meta_text_expr = (
+            pl.col("title").fill_null("") + " [SEP] " + pl.col("domain").fill_null("") + " [SEP] " + pl.col("keywords_text").fill_null("")
+        ).alias("meta_text")
+        df2 = df.with_columns([
+            meta_text_expr,
+            pl.col("contents").map_elements(
+                lambda s: " ".join(s.split()[:CONTENT_MAX_TOKENS]) if s else "", return_dtype=pl.String
+            ).alias("content_text")
+        ])
+        # create a PyTorch Dataset from the relevant columns
+        ds = TextPairDataset(df2["meta_text"].to_list(), df2["content_text"].to_list())
+        loader = DataLoader(ds, batch_size=self.batch_size, shuffle=False)
+        # iterate over batches and encode each with SentenceTransformer
+        meta_embs, content_embs = [], []
+        # TODO: wrap with tqdm later
+        for batch in loader:
+            texts_meta, texts_content = batch
+            emb_meta = self.model.encode(texts_meta, show_progress_bar=False)
+            emb_content = self.model.encode(texts_content, show_progress_bar=False)
+            meta_embs.append(emb_meta)
+            content_embs.append(emb_content)
+        # stack samples as rows in a 2D array
+        meta_emb = np.vstack(meta_embs)
+        content_emb = np.vstack(content_embs)
+        # project content embeddings to reduce dimensionality
+        content_proj = self._project_embeddings(content_emb, meta_emb.shape[1] // 3)
+        # combine with weights: metadata full (1.0), content lower (0.4)
+        final = np.hstack([meta_emb * 1.0, content_proj * 0.4])
+        # record feature_info
         self.results.feature_info["embeddings"] = (
-            f"Hybrid embeddings: {embedding_dim} (keywords) + {title_dim} (title) + "
-            f"{content_dim} (content) + 8 (domain) = {final_dim} dims total."
+            f"meta({meta_emb.shape[1]}) + content_proj({content_proj.shape[1]}) dims"
         )
-        return np.vstack(all_embeddings)
+        return final
+
 
     def combine_embeddings_with_features(self, text_embeddings: np.ndarray, df: pl.DataFrame) -> np.ndarray:
         """ combine numeric features with concatenated text embeddings (if any) """
@@ -362,14 +331,14 @@ def entries_to_dataframe(entries: List[Dict[str, Any]], keyword_field: str = "ke
     return pl.DataFrame(rows)
 
 
-
-
-
+###########################################################################################################
+# Testing embedding and clustering steps below - shouldn't need to keep anything here in the final codebase
+###########################################################################################################
 
 
 def test_cluster_entries(df: pl.DataFrame, embeddings: np.ndarray) -> Dict[str, Any]:
     """ Process and cluster the embedded entries using HDBSCAN. """
-    from onetab_autosorter.clustering import ClusteringBuilder
+    from clustering import ClusteringBuilder
     cluster_results = ClusteringBuilder.cluster_factory(
         df=df,
         embeddings=embeddings,
@@ -389,9 +358,10 @@ def test_cluster_entries(df: pl.DataFrame, embeddings: np.ndarray) -> Dict[str, 
         print(f"Cluster {label}: {count} items")
     print(f"number labeled as outliers: {len(cluster_results.outliers)}")
     zero_shot_labels = cluster_results.zero_shot_counts["zero_shot_label"].to_list()
-    zero_shot_counts = cluster_results.zero_shot_counts["url"]
+    zero_shot_counts = cluster_results.zero_shot_counts["url"].to_list()
+    print("Zero-shot labels and member counts:")
     for label, count in zip(zero_shot_labels, zero_shot_counts):
-        print(f"Zero-shot label {label}: {count} items")
+        print(f"{label}: {count} items")
     return clustered_df
 
 
@@ -404,9 +374,12 @@ def view_grouped_df(df: pl.DataFrame, n: int = 10, group_by: str = "cluster_labe
 
 
 if __name__ == "__main__":
+    import os
     import json
     from pprint import pprint
     test_data_path = r"path/to/file.json"
+    cluster_results_path = test_data_path.replace("keywords", "clusters").replace(".json", ".csv")
+    os.makedirs(os.path.dirname(cluster_results_path), exist_ok=True)
     with open(test_data_path, "r", encoding="utf-8") as fptr:
         test_data = json.load(fptr)
     results = EmbeddedDataFrameBuilder.dataframe_factory(
@@ -427,6 +400,7 @@ if __name__ == "__main__":
     df.select(pl.exclude("contents")).glimpse(max_items_per_column=10)
     print("EMBEDDINGS SHAPE, TYPE, RANGE: ", embeddings.shape, embeddings.dtype, (embeddings.min(), embeddings.max()))
     clustered_df: pl.DataFrame = test_cluster_entries(df, embeddings)
+    clustered_df.write_csv(cluster_results_path)
     # show top 10 most populated clusters
     #_ = view_grouped_df(clustered_df, n=20, group_by="cluster_label", agg_col="url")
     #labeled_df = view_grouped_df(clustered_df, n=67, group_by="zero_shot_label", agg_col="url")
