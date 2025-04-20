@@ -129,8 +129,8 @@ def main():
     # import here to avoid circular imports
     from onetab_autosorter.pipelines.factory import create_pipeline
     # create and run pipeline
-    pipeline = create_pipeline(config, config.input_file)
-    results = pipeline.run()
+    pipeline = create_pipeline(config)
+    results = pipeline.run(config.input_file)
     # Save results
     with open(config.output_json, 'w') as f:
         json.dump(results, f, indent=2)
