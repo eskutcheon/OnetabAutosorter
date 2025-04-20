@@ -2,6 +2,7 @@ import os
 import re
 import json
 from tqdm import tqdm
+from termcolor import colored
 from abc import ABC, abstractmethod
 from bs4 import BeautifulSoup, Tag
 from datetime import datetime, timezone
@@ -130,6 +131,7 @@ class NetscapeBookmarkParser(BaseParser):
         self.bookmarks.clear()
         self.group_ids.clear()
 
+    # TODO: make this a class method and add it to the base class while resolving differences with the OneTabParser
     @staticmethod
     def _parse_timestamp(timestamp_str: str) -> Optional[str]:
         """ parse a POSIX timestamp string into a formatted datetime string
@@ -181,6 +183,12 @@ class NetscapeBookmarkParser(BaseParser):
         # naming the primary root node for the folder structure "ROOT"
         root = FolderNode("ROOT")
         if root_dl:
+            print(colored("Extracting folder structure for candidate labels...", "green"))
             # extract folder structure starting from the root <DL>
             NetscapeBookmarkParser._extract_folder(root_dl, root)
+        else:
+            print(colored("WARNING: Folder extraction failed - no enclosing <dl> tag found", "yellow"))
         return root
+
+
+# TODO: create dispatcher function here to select the parser based on passed setting information

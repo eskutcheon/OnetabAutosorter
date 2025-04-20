@@ -5,11 +5,43 @@ import time
 #import signal
 from functools import wraps
 import atexit
-from typing import Callable
+from typing import Callable, List, Dict
 
+
+
+
+SERVER_URL = "http://localhost:8080/scrape"
 JAR_PATH = os.path.abspath("micronaut_scraper/build/libs/micronaut-scraper-all.jar")
 print("JAR_PATH:", JAR_PATH)
-SERVER_URL = "http://localhost:8080/scrape"
+
+
+def fetch_summary(url: str) -> str:
+    try:
+        resp = requests.post(SERVER_URL, json={"url": url}, timeout=3)
+        if resp.ok:
+            return resp.json().get("summary", "")
+    except Exception as e:
+        print(f"Failed to fetch from scraper service: {e}")
+    return ""
+
+
+# to match expected fetcher signature
+def fetch_summary_batch(urls: List[str]) -> Dict[str, str]:
+    return fetch_batch(urls)
+
+
+def fetch_batch(urls: List[str]) -> Dict[str, str]:
+    # TODO: add exponential backoff for retries to the Java files
+    try:
+        resp = requests.post(f"{SERVER_URL}/batch", json={"urls": urls}, timeout=25)
+        if resp.ok:
+            return {entry["url"]: entry.get("summary", "") for entry in resp.json()}
+    except Exception as e:
+        print(f"Batch fetch failed: {e}")
+    return {}
+
+
+
 
 
 class ScraperServiceManager:
