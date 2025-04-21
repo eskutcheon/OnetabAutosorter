@@ -19,15 +19,16 @@ SUPPORTED_MODEL_BACKBONES = [
     "distilroberta-base"
 ]
 DEFAULT_STAGES = ["parsed", "scraped", "domain_filter", "cleaned", "keywords", "embeddings", "clustered", "labeled"]
+# "data_dependent" is whether the stage hash is built only on the data, not the config (helpful when the results won't change regardless of input parameters (e.g. scraped webpage data))
 DEFAULT_STAGE_SETTINGS = {
     "parsed": {"reuse": False, "save": False, "data_dependent": False},
-    "scraped": {"reuse": True, "save": True, "data_dependent": True},
+    "scraped": {"reuse": False, "save": True, "data_dependent": True},
     # change to not data dependent if I add any arguments for the tokenizer later - for now results are only determined by input data
     "domain_filter": {"reuse": False, "save": False, "data_dependent": True},
     "cleaned": {"reuse": False, "save": False, "data_dependent": True},
     "keywords": {"reuse": True, "save": True, "data_dependent": False},
     "embeddings": {"reuse": False, "save": False, "data_dependent": False},
-    "clustered": {"reuse": False, "save": False, "data_dependent": False},
+    "clustered": {"reuse": False, "save": True, "data_dependent": False},
     "labeled": {"reuse": False, "save": True, "data_dependent": False},
 }
 

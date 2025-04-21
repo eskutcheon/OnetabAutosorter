@@ -14,6 +14,8 @@ from transformers import pipeline
 from onetab_autosorter.models.cluster_utils import BaseClusterer, KMeansClusterer, HDBSCANClusterer, ClusteringResults
 
 
+
+# TODO: if using some registry file for defaults later, I may just set this in the config since candidate labels are set from seed_labels anyway
 # 67 options for candidate labels for testing zero-shot classification
 DEFAULT_ZERO_SHOT_LABELS = [
     'robotics', 'gardening', 'art', 'research papers', 'job search', 'utilities', 'misc', 'travel',
@@ -45,6 +47,11 @@ def clustering_step(step_name: str):
                 raise
         return wrapper
     return decorator
+
+
+# TODO: split all functionality within ClusteringBuilder related to zero-shot labeling to a new class for a new stage
+    # also might as well be functional like I mentioned for building the dataframe before the embeddings
+    # TODO: need at least two versions for zero-shot labeling: single label per cluster and per-entry labeling 
 
 
 class ClusteringBuilder:

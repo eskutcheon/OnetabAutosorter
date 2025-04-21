@@ -1,8 +1,7 @@
 # Onetab Autosorter
 
-===
-
 A powerful Python-based pipeline for automatically organizing, clustering, and annotating bookmarks and tab exports (e.g. from OneTab or browser bookmarks). This project extracts and cleans link metadata, supplements it with web-scraped content, and applies advanced NLP-based keyword extraction, transformer-based embeddings, and hierarchical density-based clustering to sort the bookmarks into named categories.
+
 ---
 
 
@@ -20,6 +19,7 @@ A powerful Python-based pipeline for automatically organizing, clustering, and a
 
 ## Current Pipeline Architecture
 1. Parse Input Bookmarks
+
 Supports:
 - `.html` (OneTab or browser exports)
 - `.json` (previous pipeline output)
@@ -34,11 +34,12 @@ Supports:
 - Filters via a Perceptron Tagger
 
 4. Clean and Normalize Text
+
 Applies pattern-based filtering:
 - LaTeX, code, navigation text, etc
 - Repeated phrases, formatting junk
 
-1. Extract Keywords
+5. Extract Keywords
 - KeyBERT or BERTopic
 - Optional candidate seed keyword labels from browser folders or command line (or YAML) input
 
@@ -51,8 +52,6 @@ Applies pattern-based filtering:
 ---
 
 ## CLI Usage
-
-> UNDER CONSTRUCTION
 
 To get a description of available CLI arguments, run
 ```bash
@@ -150,8 +149,10 @@ Each pipeline stage inherits from `PipelineStage`, defined in pipeline_stages.py
 - `EmbeddingStage`
 - `ClusteringStage`
 - `LabelingStage` (coming soon)
+
 Each stage:
 - Can cache outputs
+- Propagates pipeline objects for reuse
 - Tracks arguments via hashing
 - Easily replaced or re-ordered
 

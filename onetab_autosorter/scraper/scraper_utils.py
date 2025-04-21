@@ -29,7 +29,6 @@ BROWSER_CHALLENGE_PHRASES = [
     "access to this page has been denied",
     "challenge verification",
     "ddos protection",
-    "security check"
 ]
 
 
@@ -140,6 +139,7 @@ def fetch_full_text(soup: BeautifulSoup, max_tokens: int = 1000) -> str:
     #print("SCRAPED TEXT LENGTH: ", len(text))
     return " ".join(text) # split into tokens and limit to max_tokens
 
+
 ################################ requests-related functions ################################
 
 def has_browser_safeguard(resp: requests.Response, url: str) -> bool:
@@ -147,7 +147,7 @@ def has_browser_safeguard(resp: requests.Response, url: str) -> bool:
     content_sample = resp.text[:1000].lower()
     if any(phrase in content_sample for phrase in BROWSER_CHALLENGE_PHRASES):
         write_failed_fetch_log(url, "SKIPPING: Detected browser challenge page")
-        return True  # Return empty for challenge pages
+        return True  # return empty for challenge pages
     return False
 
 
@@ -211,7 +211,7 @@ def enhanced_html_fetcher(url: str) -> str:
             decoded = resp.content.decode("utf-8", errors="replace")
         soup = BeautifulSoup(decoded, parser_type)
         # UPDATED: earlier unicode normalization - remove need for later steps
-        text_content = extract_main_content(soup)
+        text_content = fetch_full_text(soup) #extract_main_content(soup)
         text_content = unicodedata.normalize('NFKD', text_content).encode('ascii', 'ignore').decode('ascii')
     # extract main content with the enhanced extraction function
     return text_content #extract_main_content(soup)
@@ -225,26 +225,26 @@ def enhanced_html_fetcher(url: str) -> str:
 
 ################################ older webscraping functions ################################
 
-def default_html_fetcher(url: str) -> str:
-    headers = {'User-Agent': 'Mozilla/5.0'}
-    resp = requests.get(url, headers=headers, timeout=5)
-    # Try to use correct encoding
-    encoding = resp.apparent_encoding or 'utf-8'
-    content_type = resp.headers.get("Content-Type", "").lower()
-    # allow XML parsing
-    parser_type = "xml" if "xml" in content_type else "html.parser"
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
-        # try-catch handles any garbage encoding that `requests` mis-detects
-        try:
-            decoded = resp.content.decode(encoding, errors="replace")
-        except Exception as e:
-            decoded = resp.content.decode("utf-8", errors="replace")
-        soup = BeautifulSoup(decoded, parser_type)
-    # other metadata tags used for previews
-    #& if moving to using the filtering classes, this should probably just pass back a tuple of (soup, metadata)
-        # then text can be extracted upstream in the main processing pipeline
-    return fetch_full_text(soup)
+# def default_html_fetcher(url: str) -> str:
+#     headers = {'User-Agent': 'Mozilla/5.0'}
+#     resp = requests.get(url, headers=headers, timeout=5)
+#     # Try to use correct encoding
+#     encoding = resp.apparent_encoding or 'utf-8'
+#     content_type = resp.headers.get("Content-Type", "").lower()
+#     # allow XML parsing
+#     parser_type = "xml" if "xml" in content_type else "html.parser"
+#     with warnings.catch_warnings():
+#         warnings.simplefilter("ignore", XMLParsedAsHTMLWarning)
+#         # try-catch handles any garbage encoding that `requests` mis-detects
+#         try:
+#             decoded = resp.content.decode(encoding, errors="replace")
+#         except Exception as e:
+#             decoded = resp.content.decode("utf-8", errors="replace")
+#         soup = BeautifulSoup(decoded, parser_type)
+#     # other metadata tags used for previews
+#     #& if moving to using the filtering classes, this should probably just pass back a tuple of (soup, metadata)
+#         # then text can be extracted upstream in the main processing pipeline
+#     return fetch_full_text(soup)
 
 
 def write_failed_fetch_log(url: str, error: str):

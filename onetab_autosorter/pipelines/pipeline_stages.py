@@ -65,7 +65,7 @@ class PipelineStage:
         cached_data = self.load_from_cache() if self.reuse_cache else None
         # Process the data - either from cache or by running the actual processing
         if cached_data is not None:
-            print(f"[{self.name}] Using cached data")
+            print(f" [STAGE:{self.name}] Loading entries from cached data...")
             result_data = cached_data
             # Even when using cached data, we need to create objects for propagation
             self.create_stage_objects(result_data, *args, **kwargs)
@@ -77,6 +77,7 @@ class PipelineStage:
             result_data = self.process_data(data, *args, **kwargs)
             # Save to cache if needed
             if self.save_cache and self.cache_file_path:
+                print(f" [STAGE:{self.name}] Saving data to cache...")
                 self.save_data(result_data)
         # get objects to propagate to the next stage
         propagation = self.get_propagation_objects()
@@ -183,7 +184,7 @@ class Pipeline:
         # try to pop the last set of args and kwargs for the current stage and default to empty if not available
         args, kwargs = self.pop_argument_stack(stage.name)
         # run the stage with the data and any additional arguments from the argument stack
-        data, next_args = stage.run(data, *args, **kwargs)
+        data, next_args = stage.run(data, *args, **kwargs) #~ where data is actually ever saved - base class only
         self.argument_stack.append(next_args)  # collect additional arguments for the next stage (empty by default)
         return data
 
@@ -202,15 +203,15 @@ class Pipeline:
     def set_cache_hash(self, data: Any):
         # TODO: make this condition a little more robust to different types and data formats
         if isinstance(data, list) and data and isinstance(data[0], dict) and "url" in data[0]:
-            data_only_hash = ",".join([entry["url"] for entry in data])
+            data_only_str = ",".join([entry["url"] for entry in data])
+            self.data_only_hash = compute_hash(data_only_str)
             # if the stage is only data-dependent, don't use setting metadata to compute the hash (ensures no recomputation when not needed)
             if self.settings_metadata:
                 metadata_str = ",".join([f"{k}={v}" for k, v in self.settings_metadata.items() if v])
-                metadata_str = ",".join(metadata_str) + data_only_hash
+                metadata_str = metadata_str + "\n" + data_only_str
                 self.cache_hash = compute_hash(metadata_str)
             else:
-                self.cache_hash = compute_hash(data_only_hash)
-            self.data_only_hash = compute_hash(data_only_hash)
+                self.cache_hash = self.data_only_hash
         else:
             raise ValueError("Data must be a list of dictionaries with 'url' keys to compute the cache hash.")
 
@@ -244,6 +245,7 @@ create:
 # I could make all of these simple functions for creating each stage once I write a better way to handle propagating extra arguments
     # only thing I can think to do with the current setup is adding a "cls" argument to all run_fn and calling cls.to_propagate() in the run function
 
+# TODO: still considering registering each cache saving as a hook set by the pipeline factory - loading logic could stay the same
 
 class ParsingStage(PipelineStage):
     def __init__(self, file_path: str, stage_settings: StageCacheSettings):

@@ -404,3 +404,6 @@ if __name__ == "__main__":
     # show top 10 most populated clusters
     #_ = view_grouped_df(clustered_df, n=20, group_by="cluster_label", agg_col="url")
     #labeled_df = view_grouped_df(clustered_df, n=67, group_by="zero_shot_label", agg_col="url")
+
+
+# TODO: split the embedding class into a separate dataframe builder stage - maybe fully function-based so that I'm not making another builder class unnecessarily
